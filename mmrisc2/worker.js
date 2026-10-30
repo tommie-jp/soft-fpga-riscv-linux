@@ -5,7 +5,8 @@
 //         LogicAnalyzer の制御 (soft-FPGA の sft-la-glue.js の setupLaWorker が送る):
 //         freezeRing / thawRing / setLA{enabled} / setPostDelay{n} / clearTrigger /
 //         setEdgeTrigger{word,bit,dir} / setValueTrigger{word,mask,cmp}
-//   送り: {type: 'status', text}              読み込みの進み
+//   送り: {type: 'status', id, ...}           読み込みの進み。文言はページが言語に合わせて作る
+//                                             (id: wasm / fetch / restore / running{size,tFetch,tRestore})
 //         {type: 'ready', ringSize, ringWords}  LogicAnalyzer を組み立ててよい
 //         {type: 'out', bytes: Uint8Array}    UART から出た字
 //         {type: 'frame', laAck, head, frozen, trigFireHead, ringSnap}  ring の写し (setupLaWorker の frame)
@@ -77,26 +78,23 @@ function postFrame() {
 }
 
 async function main() {
-    self.postMessage({ type: 'status', text: 'Wasm を読み込み中' });
+    self.postMessage({ type: 'status', id: 'wasm' });
     sim = await createSim();
     self.postMessage({ type: 'ready', ringSize: sim._get_ring_size(), ringWords: sim._get_ring_words() });
 
-    self.postMessage({ type: 'status', text: '保存した状態 (state.gz) を取得・展開中' });
+    self.postMessage({ type: 'status', id: 'fetch' });
     let t0 = performance.now();
     sim.stateBytes = await fetchGunzip('state.gz');
     sim.stateOffset = 0;
     const tFetch = (performance.now() - t0) / 1000;
 
-    self.postMessage({ type: 'status', text: '読み戻し中' });
+    self.postMessage({ type: 'status', id: 'restore' });
     t0 = performance.now();
     if (sim._sim_restore() !== 0) throw new Error('sim_restore failed');
     const size = sim.stateBytes.length;
     sim.stateBytes = null;
     const tRestore = (performance.now() - t0) / 1000;
-    self.postMessage({
-        type: 'status',
-        text: `動作中 (${(size / 1e6).toFixed(0)} MB を取得・展開 ${tFetch.toFixed(1)} 秒、読み戻し ${tRestore.toFixed(1)} 秒)`,
-    });
+    self.postMessage({ type: 'status', id: 'running', size, tFetch, tRestore });
 
     let lastCycle = sim._sim_cycle();
     let lastStats = performance.now();
