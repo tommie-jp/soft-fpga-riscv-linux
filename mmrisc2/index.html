@@ -1,0 +1,126 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>mmRISC-2 Linux</title>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/xterm@5.3.0/css/xterm.css">
+<style>
+  :root {
+    --bg: #f6f6f4;
+    --fg: #1d1d1b;
+    --muted: #6b6b66;
+    --term-bg: #111211;
+    --accent: #2f6f4f;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #161716; --fg: #e8e8e4; --muted: #9a9a94; --accent: #7fc19c; }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--fg);
+    font: 15px/1.6 system-ui, -apple-system, "Segoe UI", "Hiragino Sans", sans-serif;
+  }
+  main { max-width: 960px; margin: 0 auto; padding: 24px 16px 40px; }
+  h1 { font-size: 22px; margin: 0 0 4px; }
+  h2 { font-size: 18px; margin: 28px 0 4px; }
+  p.lead { margin: 0 0 16px; color: var(--muted); }
+  #term { background: var(--term-bg); padding: 8px; border-radius: 6px; }
+  #term .xterm-viewport { background-color: var(--term-bg) !important; scrollbar-color: #444 var(--term-bg); }
+  #bar {
+    display: flex; flex-wrap: wrap; gap: 4px 20px; margin-top: 8px;
+    font: 13px/1.5 ui-monospace, "SFMono-Regular", Menlo, monospace; color: var(--muted);
+  }
+  #status { color: var(--accent); }
+  ul.credits { margin: 4px 0 0; padding-left: 20px; font-size: 13px; color: var(--muted); }
+  ul.credits a, p.nav a { color: var(--accent); }
+  p.nav { margin: 0 0 8px; font-size: 13px; }
+  kbd { font-family: inherit; border: 1px solid var(--muted); border-radius: 3px; padding: 0 4px; }
+</style>
+</head>
+<body>
+<main>
+  <p class="nav"><a href="../">soft-fpga-riscv-linux</a></p>
+  <h1>mmRISC-2 で Linux</h1>
+  <p class="lead">
+    RV64GC コア mmRISC-2 の RTL を Verilator で C++ にし、Wasm にした模型です。
+    PC で起動を済ませて保存した状態を読み戻し、BusyBox のシェルから始めます。
+    <kbd>ls</kbd> などを打てます。1 クロックずつ回しているので、応答は数秒かかります。
+  </p>
+  <div id="term"></div>
+  <div id="bar">
+    <span id="status">準備中</span>
+    <span id="cycle"></span>
+    <span id="rate"></span>
+  </div>
+  <h2>CPU の中 (Logic Analyzer)</h2>
+  <p class="lead">
+    1 クロックごとの退役・トラップ・TLB ミス・主記憶の読み書き・UART を記録しています (直近 8192 クロック)。
+    ⚙ Trigger のプリセット「打鍵」を選んで Set し、端末で字を打つと、その字が入った瞬間からの波形で止まります。
+  </p>
+  <div id="la-root"></div>
+  <h2>出どころとライセンス</h2>
+  <ul class="credits">
+    <li>このページと模型を回す道具は <a href="https://github.com/tommie-jp/soft-fpga-riscv-linux">soft-fpga-riscv-linux</a> (Apache-2.0、<a href="licenses/soft-fpga-riscv-linux-LICENSE.txt">LICENSE</a>)。
+      mmRISC-2 を使った個人の試みで、mmRISC-2 の作者の公認ではありません</li>
+    <li><a href="https://github.com/munetomo-maruyama/mmRISC-2">mmRISC-2</a> (Munetomo Maruyama) の RTL と起動の物一式。
+      Apache-2.0 (<a href="licenses/mmrisc2-LICENSE.txt">LICENSE</a>、<a href="licenses/mmrisc2-NOTICE.txt">NOTICE</a>)</li>
+    <li>保存した状態 (<code>state.gz</code>) に入っている物:
+      Linux カーネル (GPL-2.0。ソースは <a href="https://github.com/munetomo-maruyama/mmRISC-2/releases/tag/linux-src-4929f78c004e">mmRISC-2 の Release</a>)、
+      OpenSBI (BSD-2-Clause。<a href="https://github.com/riscv-software-src/opensbi">ソース</a> と mmRISC-2 の <code>opensbi_patches/</code>)、
+      BusyBox 1.37.0 (GPL-2.0。Debian の <a href="https://packages.debian.org/source/trixie/busybox">busybox 1:1.37.0-6</a> の
+      <code>busybox-static</code> をそのまま)</li>
+    <li>Verilator の実行時ライブラリ (<a href="https://github.com/verilator/verilator">Verilator</a> 5.042、LGPL-3.0 または Artistic-2.0)、
+      <a href="https://github.com/xtermjs/xterm.js">xterm.js</a> (MIT)、
+      Logic Analyzer は <a href="https://github.com/tommie-jp/soft-fpga">soft-FPGA</a> の rtlscope (MIT、<a href="licenses/soft-fpga-LICENSE.txt">LICENSE</a>)</li>
+  </ul>
+</main>
+<script src="https://cdn.jsdelivr.net/npm/xterm@5.3.0/lib/xterm.js"></script>
+<!-- Logic Analyzer: 読み込み順は soft-FPGA の sft-la-glue.js の約束どおり -->
+<script src="la-defs.js"></script>
+<script src="la/rtlscope-la.js"></script>
+<script src="la/sft-la-toolbar.js"></script>
+<script src="la/sft-trigger-presets.js"></script>
+<script src="la/sft-la-ctrl.js"></script>
+<script src="la/sft-la-glue.js"></script>
+<script>
+  const term = new Terminal({ cols: 100, rows: 28, convertEol: false, fontSize: 14, scrollback: 5000,
+                              theme: { background: '#111211' } });
+  term.open(document.getElementById('term'));
+  term.focus();
+
+  const $ = (id) => document.getElementById(id);
+  const worker = new Worker('worker.js', { type: 'module' });
+  let lag = null;   // setupLaWorker の戻り (LogicAnalyzer)
+  const drawLa = () => { if (lag) lag.draw(); requestAnimationFrame(drawLa); };
+  worker.onmessage = (e) => {
+    const m = e.data;
+    if (m.type === 'out') term.write(m.bytes);
+    else if (m.type === 'frame') { if (lag) lag.frame(m); }
+    else if (m.type === 'ready') {
+      lag = setupLaWorker({
+        worker, ringSize: m.ringSize, ringWords: m.ringWords, rootId: 'la-root',
+        config: MMRISC2_LA_CONFIG, signals: MMRISC2_LA_SIGNALS, zoomIdx: 0,
+        triggerPresets: MMRISC2_TRIGGER_PRESETS
+      });
+      requestAnimationFrame(drawLa);
+    }
+    else if (m.type === 'status') $('status').textContent = m.text;
+    else if (m.type === 'error') $('status').textContent = 'エラー: ' + m.text;
+    else if (m.type === 'stats') {
+      $('cycle').textContent = `クロック ${m.cycle.toLocaleString()}`;
+      $('rate').textContent = `${Math.round(m.rate / 1000).toLocaleString()} k クロック/秒`;
+    }
+  };
+  // ash はプロンプトのたびにカーソル位置を問い (ESC[6n)、xterm は答え (ESC[行;桁R) を返す。
+  // 答えを渡すと、その後の模型の時間で約 50 ミリ秒 (画面では 8 秒ほど) 打った字が捨てられるので渡さない
+  const CURSOR_REPORT = /\x1b\[\d+;\d+R/g;
+  term.onData((s) => {
+    const keys = s.replace(CURSOR_REPORT, '');
+    if (keys) worker.postMessage({ type: 'key', bytes: Array.from(new TextEncoder().encode(keys)) });
+  });
+</script>
+</body>
+</html>
