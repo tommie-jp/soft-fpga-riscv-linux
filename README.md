@@ -65,7 +65,12 @@ Build outputs are `build/<core>/`, `state/` and `dist/`, kept out of git.
 - The model connects through the ports of its top: `clk`, `rst_n`, `uart_tx_*`, `uart_rx_*`,
   `max_cycles`, `stop_code`, `cycle_count`, `obs_*`
 - Every core drives `obs_*` (retire, PC, privilege, trap, TLB miss, main memory); a signal a core
-  cannot provide is 0. The logic analyzer's signal definitions (`web/la-defs.js`) are then shared
+  cannot provide is 0. The logic analyzer's signal definitions (`web/la-defs.js`) are then shared.
+  The top also drives the writeback (`obs_rd*`), interrupt lines and `mip`/`mie`, `satp`, L1
+  requests, performance events (`obs_events`) and SoC state (`obs_dev`)
+- Register window: put a number on `reg_sel` (0-31 x, 32-63 f, 64 and up CSRs) and eval; the value
+  is on `reg_val`. The clock does not move, so the model state does not change. The Wasm build
+  fills the register panel this way
 - The Linux environment (kernel, OpenSBI, device tree, saved state) is per core. The rootfs is
   shared by ISA width
 

@@ -52,6 +52,26 @@
   table.examples td:first-child { white-space: nowrap; }
   table.examples button { font-family: ui-monospace, "SFMono-Regular", Menlo, monospace; }
   #la-scroll { overflow-x: auto; }
+  .la-opts { display: flex; flex-wrap: wrap; gap: 4px 16px; align-items: center; margin: 0 0 6px; font-size: 13px; }
+  .la-opts select { font: inherit; color: var(--fg); background: var(--bg); border: 1px solid var(--line); border-radius: 4px; }
+  /* レジスタの窓とトラップの記録 */
+  #regs, #traps { font: 12px/1.5 ui-monospace, "SFMono-Regular", Menlo, monospace; }
+  .rp-head { margin: 0 0 6px; color: var(--accent); overflow-wrap: anywhere; }
+  .rp-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(210px, 1fr)); gap: 0 12px; }
+  .rp-cell { display: flex; justify-content: space-between; gap: 8px; padding: 0 4px; border-radius: 3px; }
+  .rp-name { color: var(--muted); white-space: nowrap; }
+  .rp-wrote { background: #ffe066; color: #1d1d1b; }
+  .rp-wrote .rp-name { color: #555; }
+  .rp-changed { background: rgba(255, 224, 102, 0.3); }
+  .rp-unknown .rp-val { color: var(--muted); }
+  .rp-more { margin-top: 6px; }
+  .rp-more summary { cursor: pointer; color: var(--muted); }
+  .rp-note { margin-top: 6px; color: var(--muted); font-size: 12px; }
+  table.rp-traps { border-collapse: collapse; }
+  table.rp-traps th, table.rp-traps td { padding: 1px 10px 1px 0; text-align: right; }
+  table.rp-traps th { color: var(--muted); font-weight: normal; }
+  table.rp-traps tr[data-s] { cursor: pointer; }
+  table.rp-traps tr[data-s]:hover { background: rgba(127, 193, 156, 0.2); }
   ul.credits { margin: 4px 0 0; padding-left: 20px; font-size: 13px; color: var(--muted); }
   kbd { font-family: inherit; border: 1px solid var(--muted); border-radius: 3px; padding: 0 4px; }
   @media (max-width: 640px) {
@@ -118,14 +138,48 @@
 
   <h2><span lang="ja">CPU の中 (Logic Analyzer)</span><span lang="en">Inside the CPU (logic analyzer)</span></h2>
   <p class="lead" lang="ja">
-    1 クロックごとの退役・トラップ・TLB ミス・主記憶の読み書き・UART を記録しています (直近 8192 クロック)。
+    1 クロックごとに、退役した命令とその書き戻し・トラップ・割り込み・TLB ミス・キャッシュ・パイプラインの事象・
+    主記憶・SD カード・UART を記録しています (直近 16384 サンプル)。一番上の Asm の行は退役した命令を読んだ物です。
     ⚙ Trigger のプリセット「打鍵 / Key press」を選んで Set し、端末で字を打つと、その字が入った瞬間からの波形で止まります。
+    「事象のあるクロックだけ」にすると、退役・トラップ・UART も無く、割り込みの線・TLB ミス・主記憶・SD なども
+    変わらないクロックを飛ばすので、もっと長い間が入ります。パイプラインの事象 (Pipeline の組) はそのクロックが
+    記録された時だけ見えます。
   </p>
   <p class="lead" lang="en">
-    Each clock records retire, trap, TLB miss, main memory reads and writes, and the UART (the last 8192 clocks).
+    Each clock records the retired instruction and its writeback, traps, interrupts, TLB misses, caches, pipeline
+    events, main memory, the SD card and the UART (the last 16384 samples). The Asm row at the top disassembles
+    the retired instructions.
     Choose the ⚙ Trigger preset "打鍵 / Key press", Set it, and type a key: the trace stops from the moment the key arrives.
+    With "only clocks with events", clocks with no retire, trap or UART activity, and no change in the interrupt
+    lines, TLB misses, main memory, SD and so on, are skipped, so a longer span fits. Pipeline events show only
+    on the clocks that are recorded.
   </p>
+  <div class="la-opts">
+    <label><span lang="ja">記録</span><span lang="en">Record</span>
+      <select id="sample-mode" autocomplete="off">
+        <option value="0" data-ja="毎クロック" data-en="every clock">毎クロック</option>
+        <option value="1" data-ja="事象のあるクロックだけ (退役・トラップ・UART・遅い信号の変化)" data-en="only clocks with events (retire, trap, UART, changes of slow signals)">事象のあるクロックだけ</option>
+      </select>
+    </label>
+  </div>
   <div id="la-scroll"><div id="la-root"></div></div>
+
+  <h2><span lang="ja">レジスタ</span><span lang="en">Registers</span></h2>
+  <p class="lead" lang="ja">
+    動いている間は今の値です。Logic Analyzer を止める (Hold かトリガー) と、カーソルを当てた時点の x0-x31 を
+    書き戻しの記録から組み立てて出します (カーソルが無ければマーカー A、トリガーの所)。黄色はその時点で書いたレジスタです。
+  </p>
+  <p class="lead" lang="en">
+    While running these are the current values. Stop the logic analyzer (Hold or a trigger) and x0-x31 follow the
+    cursor: they are rebuilt from the recorded writebacks (without a cursor, at marker A or the trigger). Yellow marks
+    the register written at that point.
+  </p>
+  <div id="regs"></div>
+
+  <h2><span lang="ja">トラップの記録</span><span lang="en">Trap log</span></h2>
+  <p class="lead" lang="ja">ring の中のトラップ (新しい順、40 件まで)。T はトリガーからのサンプル数です。</p>
+  <p class="lead" lang="en">Traps in the ring, newest first (up to 40). T counts samples from the trigger.</p>
+  <div id="traps"></div>
 
   <h2><span lang="ja">出どころとライセンス</span><span lang="en">Sources and licenses</span></h2>
   <ul class="credits" lang="ja">
@@ -158,12 +212,14 @@
 </main>
 <script src="https://cdn.jsdelivr.net/npm/xterm@5.3.0/lib/xterm.js"></script>
 <!-- Logic Analyzer: 読み込み順は soft-FPGA の sft-la-glue.js の約束どおり -->
+<script src="rv-disasm.js"></script>
 <script src="la-defs.js"></script>
 <script src="la/rtlscope-la.js"></script>
 <script src="la/sft-la-toolbar.js"></script>
 <script src="la/sft-trigger-presets.js"></script>
 <script src="la/sft-la-ctrl.js"></script>
 <script src="la/sft-la-glue.js"></script>
+<script src="regs-panel.js"></script>
 <script>
   // 狭い画面 (スマホ) では字を小さくし、桁を 80 にする。それでも収まらない分は #term を横に送る
   const NARROW = window.matchMedia('(max-width: 640px)').matches;
@@ -204,27 +260,46 @@
     $('cycle').textContent = t.cycle(lastStats.cycle);
     $('rate').textContent = t.rate(lastStats.rate);
   };
-  SFRL_LANG.onChange(() => { showStatus(); showStats(); });
+  // 選ぶ欄の文言 (option の data-ja / data-en)
+  const showOptions = () => {
+    document.querySelectorAll('option[data-ja]').forEach((o) => { o.textContent = o.dataset[SFRL_LANG.get()]; });
+  };
+  SFRL_LANG.onChange(() => { showStatus(); showStats(); showOptions(); });
 
   const worker = new Worker('worker.js', { type: 'module' });
   let lag = null;   // setupLaWorker の戻り (LogicAnalyzer)
-  const drawLa = () => { if (lag) lag.draw(); requestAnimationFrame(drawLa); };
+  let regs = null;  // レジスタの窓とトラップの記録 (regs-panel.js)
+  const drawLa = () => {
+    if (lag) lag.draw();
+    if (regs) { regs.draw(lag && lag.la); regs.drawTraps(lag && lag.la); }
+    requestAnimationFrame(drawLa);
+  };
   worker.onmessage = (e) => {
     const m = e.data;
     if (m.type === 'out') term.write(m.bytes);
-    else if (m.type === 'frame') { if (lag) lag.frame(m); }
+    else if (m.type === 'frame') { if (regs) regs.frame(m); if (lag) lag.frame(m); }
     else if (m.type === 'ready') {
+      // 信号の説明 (tip) は組み立てる時の言語で選ぶ
+      const laSignals = mmrisc2LaSignals(SFRL_LANG.get());
       lag = setupLaWorker({
         worker, ringSize: m.ringSize, ringWords: m.ringWords, rootId: 'la-root',
-        config: MMRISC2_LA_CONFIG, signals: MMRISC2_LA_SIGNALS, zoomIdx: 0,
+        config: Object.assign({}, MMRISC2_LA_CONFIG, { lang: SFRL_LANG.get(), signals: laSignals }), signals: laSignals, zoomIdx: 0,
         triggerPresets: MMRISC2_TRIGGER_PRESETS
       });
+      // 記録の仕方は Worker の既定 (毎クロック) と選ぶ欄を合わせる (再読み込みで欄だけ残ることがある)
+      worker.postMessage({ type: 'sampleMode', mode: Number($('sample-mode').value) });
+      regs = new RegsPanel({ rootId: 'regs', trapRootId: 'traps', ringSize: m.ringSize, ringWords: m.ringWords,
+                             lang: () => SFRL_LANG.get() });
       requestAnimationFrame(drawLa);
     }
     else if (m.type === 'status') { lastStatus = m; showStatus(); }
     else if (m.type === 'error') { lastStatus = { id: 'error', text: m.text }; showStatus(); }
     else if (m.type === 'stats') { lastStats = m; showStats(); }
   };
+
+  $('sample-mode').addEventListener('change', (e) => {
+    worker.postMessage({ type: 'sampleMode', mode: Number(e.target.value) });
+  });
 
   const sendKeys = (s) => worker.postMessage({ type: 'key', bytes: Array.from(new TextEncoder().encode(s)) });
 

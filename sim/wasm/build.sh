@@ -45,7 +45,8 @@ em++ "${FLAGS[@]}" "$OBJ"/*.wasm.o "$HERE/harness.cpp" \
                           "_get_ring_ptr","_get_head","_get_ring_size","_get_ring_words",
                           "_sim_freeze_ring","_sim_thaw_ring","_sim_ring_frozen","_sim_set_la","_sim_set_post_delay",
                           "_sim_clear_trigger","_sim_set_edge_trigger","_sim_set_value_trigger",
-                          "_sim_trigger_hit","_sim_trigger_fired","_sim_get_trig_fire_head"]' \
+                          "_sim_trigger_hit","_sim_trigger_fired","_sim_get_trig_fire_head",
+                          "_sim_set_sample_mode","_sim_regs","_sim_regs_frozen","_sim_reg_count","_sim_regs_fire","_sim_regs_cycle"]' \
   -s EXPORTED_RUNTIME_METHODS='["HEAPU8","HEAPU32"]' \
   -s INITIAL_MEMORY=536870912 -s ALLOW_MEMORY_GROWTH=1 -s MAXIMUM_MEMORY=2147483648 \
   -s EXIT_RUNTIME=0 \

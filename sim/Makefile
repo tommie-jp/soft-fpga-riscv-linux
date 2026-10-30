@@ -18,7 +18,7 @@ BUILD    := $(ROOT)/build/$(CORE)
 OBJ_DIR  := $(BUILD)/obj
 SIM_BIN  := $(OBJ_DIR)/Vtop
 
-.PHONY: all clean state-name state-gz wasm wasm-restore web web-serve FORCE
+.PHONY: all clean state-name state-gz wasm wasm-restore wasm-test web web-serve FORCE
 
 all: $(SIM_BIN)
 
@@ -68,16 +68,20 @@ LINES ?= ls
 wasm-restore: $(WASM_OUT) $(STATE).gz
 	SIM_MJS=$(WASM_OUT) node wasm/run-node.mjs $(STATE).gz $(LINES)
 
+# Logic Analyzer まわりの試験 (逆アセンブラ・レジスタの窓と書き戻しの記録・記録の間引き)
+wasm-test: $(WASM_OUT) $(STATE).gz
+	WEB=$(ROOT)/web SIM_MJS=$(WASM_OUT) node wasm/test-la.mjs $(STATE).gz
+
 # ブラウザ版: dist/ に揃え、そこを HTTP で配る (make web-serve)。
 # dist/index.html が目次、dist/<コア>/ がコアのページ (端末と Logic Analyzer)
 WEB      := $(ROOT)/web
 WEB_DIST := $(ROOT)/dist
 CORE_WEB := $(WEB_DIST)/$(CORE)
 
-web: $(WASM_OUT) $(STATE).gz $(WEB)/index.html $(WEB)/core/index.html $(WEB)/worker.js $(WEB)/la-defs.js $(WEB)/lang.js $(wildcard $(WEB)/la/*.js)
+web: $(WASM_OUT) $(STATE).gz $(WEB)/index.html $(WEB)/core/index.html $(WEB)/worker.js $(WEB)/la-defs.js $(WEB)/lang.js $(WEB)/rv-disasm.js $(WEB)/regs-panel.js $(wildcard $(WEB)/la/*.js)
 	mkdir -p $(CORE_WEB)/la $(CORE_WEB)/licenses
 	cp $(WEB)/index.html $(WEB)/lang.js $(WEB_DIST)/
-	cp $(WEB)/core/index.html $(WEB)/worker.js $(WEB)/la-defs.js $(WEB)/lang.js $(WASM_OUT) $(WASM_OUT:.mjs=.wasm) $(CORE_WEB)/
+	cp $(WEB)/core/index.html $(WEB)/worker.js $(WEB)/la-defs.js $(WEB)/lang.js $(WEB)/rv-disasm.js $(WEB)/regs-panel.js $(WASM_OUT) $(WASM_OUT:.mjs=.wasm) $(CORE_WEB)/
 	cp $(WEB)/la/*.js $(CORE_WEB)/la/
 	cp $(STATE).gz $(CORE_WEB)/state.gz
 	for f in $(CORE_LICENSES); do cp $$f $(CORE_WEB)/licenses/$(CORE)-$$(basename $$f).txt; done

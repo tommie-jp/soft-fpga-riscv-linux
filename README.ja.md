@@ -62,7 +62,11 @@ scripts/deploy-pages.sh  dist/ を gh-pages に置く
 - 模型とはトップのポートでつながります: `clk`・`rst_n`・`uart_tx_*`・`uart_rx_*`・`max_cycles`・
   `stop_code`・`cycle_count`・`obs_*`
 - `obs_*` (退役・PC・特権・トラップ・TLB ミス・主記憶) はどのコアでも出す約束です。出せない信号は 0 にします。
-  そうすれば Logic Analyzer の信号の定義 (`web/la-defs.js`) も共通にできます
+  そうすれば Logic Analyzer の信号の定義 (`web/la-defs.js`) も共通にできます。
+  ほかに書き戻し (`obs_rd*`)・割り込みの線と `mip`/`mie`・`satp`・L1 への要求・性能の事象 (`obs_events`)・
+  SoC の状態 (`obs_dev`) も出します
+- レジスタの窓: `reg_sel` に番号 (0-31 x、32-63 f、64- CSR) を置いて eval すると `reg_val` に値が出ます。
+  クロックは動かさないので、模型の状態は変わりません。Wasm はこれでレジスタの欄を作ります
 - Linux の環境 (カーネル・OpenSBI・device tree・保存ファイル) はコア別です。rootfs は ISA の幅で共通です
 
 ## ライセンス

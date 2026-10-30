@@ -10,13 +10,19 @@
 //         {type: 'ready', ringSize, ringWords}  LogicAnalyzer を組み立ててよい
 //         {type: 'out', bytes: Uint8Array}    UART から出た字
 //         {type: 'frame', laAck, head, frozen, trigFireHead, ringSnap}  ring の写し (setupLaWorker の frame)
+//           frame には regs (レジスタの窓、2 語ずつの Uint32Array の ArrayBuffer)、regsFrozen (止まった時の値か)、
+//           regsFire (トリガーが発火した時の写し。無ければ null)、regsCycle (regs を取った時のクロック数) も載せる。
+//           head はいつも、最後に送った ring の写しの head (写しを送らない frame で先へ進めると、古い写しを
+//           新しい head で読んでしまう)
 //         {type: 'stats', cycle, rate}        クロック数と速さ [クロック/秒]
+//   受け: {type: 'sampleMode', mode}           ring に書く時 (0 毎クロック、1 事象のあるクロックだけ)
 //         {type: 'error', text}
 import createSim from './sim.mjs';
 
 const SLICE_MS = 30;        // 1 回に回す時間。この合間に打鍵と制御を受ける
 const RUN_CYCLES = 2000;    // sim_run 1 回の上限 [クロック]
 const STATS_MS = 1000;
+const RUN_FRAME_MS = 100;   // 動いている間に ring とレジスタを写す間隔 (ring は 1 MB ほどある)
 
 let sim = null;
 let laAck = 0;      // 処理した LogicAnalyzer の制御の数
@@ -37,6 +43,8 @@ self.onmessage = (e) => {
     if (!sim) return;
     if (m.type === 'key') {
         for (const b of m.bytes) sim._sim_send(b);
+    } else if (m.type === 'sampleMode') {
+        sim._sim_set_sample_mode(m.mode | 0);
     } else if (LA_CONTROL[m.type]) {
         LA_CONTROL[m.type](m);
         laAck++;
@@ -59,22 +67,43 @@ function flushOut() {
     sim._sim_out_clear();
 }
 
-// ring の写しを送る。止めた (Hold・トリガー) ring は変わらないので、止まった直後と制御が来た時だけ写す
+// ring とレジスタの写しを送る。止めた (Hold・トリガー) ring は変わらないので、止まった直後と制御が来た時だけ写す。
+// 動いている間は RUN_FRAME_MS ごとに写す (毎回写すと重い)
 let wasFrozen = false;
+let lastSnap = 0;
+let snapHead = 0;   // 最後に送った ring の写しの head。写しを送らない frame もこの head を送る (写しと合わせる)
+function readRegs() {
+    const ptr = sim._sim_regs() >>> 2;
+    return sim.HEAPU32.slice(ptr, ptr + sim._sim_reg_count() * 2).buffer;
+}
+// トリガーが発火した時の写し (無ければ null)
+function readFireRegs() {
+    const ptr = sim._sim_regs_fire() >>> 2;
+    return ptr ? sim.HEAPU32.slice(ptr, ptr + sim._sim_reg_count() * 2).buffer : null;
+}
 function postFrame() {
     const frozen = !!sim._sim_ring_frozen();
+    const now = performance.now();
     let ringSnap = new ArrayBuffer(0);
-    if (!frozen || !wasFrozen || laDirty) {
+    let regs = null;
+    let regsFire = null;
+    if ((!frozen && now - lastSnap >= RUN_FRAME_MS) || (frozen && !wasFrozen) || laDirty) {
         const base = sim._get_ring_ptr() >>> 2;
         const n = sim._get_ring_size() * sim._get_ring_words();
         ringSnap = sim.HEAPU32.slice(base, base + n).buffer;
+        regs = readRegs();
+        regsFire = readFireRegs();
+        snapHead = sim._get_head() >>> 0;
         laDirty = false;
+        lastSnap = now;
     }
     wasFrozen = frozen;
+    const transfer = [ringSnap, regs, regsFire].filter((b) => b);
     self.postMessage({
-        type: 'frame', laAck, head: sim._get_head() >>> 0, frozen,
-        trigFireHead: sim._sim_get_trig_fire_head(), ringSnap,
-    }, [ringSnap]);
+        type: 'frame', laAck, head: snapHead, frozen, regsCycle: sim._sim_regs_cycle(),
+        trigFireHead: sim._sim_get_trig_fire_head(), ringSnap, regs, regsFire,
+        regsFrozen: !!sim._sim_regs_frozen(),
+    }, transfer);
 }
 
 async function main() {

@@ -110,7 +110,35 @@ module tb_mmrisc2
         output logic [63:0] obs_mem_addr,       //   その番地
         output logic        obs_mem_rdata,      // 読んだデータが 1 拍来た (R の受け渡し)
         output logic        obs_mem_wdata,      // 書くデータを 1 拍出した (W の受け渡し)
-        output logic [63:0] obs_mem_data        //   そのデータ
+        output logic [63:0] obs_mem_data,       //   そのデータ
+        // 退役した命令が整数レジスタに書いた値 (CORE の trace_rd_*)
+        output logic        obs_rd_we,          // 書いた (x0 は除く)
+        output logic [4:0]  obs_rd,             //   その番号
+        output logic [63:0] obs_rd_data,        //   その値
+        // 整数レジスタへのもう 1 つの書き込み (退役とは別の時に書く物。mmRISC-2 は FPU の答えが整数の時、
+        // feq・fcvt.l.d・fmv.x.d など)。レジスタを組み立てるのに要る
+        output logic        obs_rd2_we,
+        output logic [4:0]  obs_rd2,
+        output logic [63:0] obs_rd2_data,
+        output logic        obs_trap_to_s,      // トラップが S モードへ行く (委譲された)
+        output logic [63:0] obs_trap_epc,       //   epc (トラップした命令の PC)
+        output logic [31:0] obs_events,         // そのクロックの性能の事象 (コアに依る。mmRISC-2 は hpm_ev)
+        output logic [3:0]  obs_irq,            // コアへの割り込みの線 [0] M soft [1] M timer [2] M ext [3] S ext
+        output logic        obs_irq_pending,    // 許された割り込みが待っている (WFI から起きる条件)
+        output logic [1:0]  obs_ie,             // [0] mstatus.SIE [1] mstatus.MIE
+        output logic [15:0] obs_mip,            // mip の下 16 ビット
+        output logic [15:0] obs_mie,            // mie の下 16 ビット
+        output logic [63:0] obs_satp,           // satp (ページ表の根。プロセスが替わると変わる)
+        output logic        obs_ireq,           // コアが I$ に読みを出した (受け渡し)
+        output logic        obs_dreq,           // コアが D$ に読み書きを出した (受け渡し)
+        output logic [4:0]  obs_dreq_cmd,       //   その種類 (0 読み、1 書き、ほかは AMO など)
+        output logic [63:0] obs_dreq_addr,      //   その番地 (仮想)
+        output logic [7:0]  obs_dev,            // SoC: [2:0] SD の状態 [3] SD コマンド済み [4] SD データ済み
+                                                //      [5] PLIC の割り込み [6] PLIC の claim [7] DMA が動いている
+        // レジスタを読む口 (Wasm のレジスタの窓)。reg_sel を置いて eval すると reg_val に出る。
+        // 0-31 x0-x31、32-63 f0-f31、64- CSR (下の case の並び)。無い番号は 0
+        input  logic [7:0]  reg_sel,
+        output logic [63:0] reg_val
     );
 
     localparam int          SOC_ADDR_WIDTH = 40;
@@ -663,6 +691,71 @@ module tb_mmrisc2
     assign obs_mem_rdata  = axi4_rvalid && axi4_rready;
     assign obs_mem_wdata  = axi4_wvalid && axi4_wready;
     assign obs_mem_data   = obs_mem_rdata ? axi4_rdata : axi4_wdata;
+    assign obs_rd_we      = rst_n && `CORE.trace_valid && `CORE.trace_rd_we;
+    assign obs_rd         = `CORE.trace_rd;
+    assign obs_rd_data    = `CORE.trace_rd_data;
+    assign obs_rd2_we     = rst_n && `CORE.u_rf.we_b && (`CORE.u_rf.rd_b != 5'd0);
+    assign obs_rd2        = `CORE.u_rf.rd_b;
+    assign obs_rd2_data   = `CORE.u_rf.rd_data_b;
+    assign obs_trap_to_s  = `CORE.trap_to_s;
+    assign obs_trap_epc   = `CORE.trap_epc;
+    assign obs_events     = rst_n ? 32'(`CORE.hpm_ev) : 32'd0;
+    assign obs_irq        = {u_cpu_top.irq_s_ext[0], u_cpu_top.irq_m_ext[0],
+                             u_cpu_top.irq_m_timer[0], u_cpu_top.irq_m_soft[0]};
+    assign obs_irq_pending = `CORE.u_csr.irq_any;
+    assign obs_ie         = {`CORE.u_csr.mstatus_mie, `CORE.u_csr.mstatus_sie};
+    assign obs_mip        = `CORE.u_csr.mip_val[15:0];
+    assign obs_mie        = `CORE.u_csr.mie_val[15:0];
+    assign obs_satp       = `CORE.u_csr.satp;
+    assign obs_ireq       = u_cpu_top.cpu_i_req_valid && u_cpu_top.cpu_i_req_ready;
+    assign obs_dreq       = u_cpu_top.cpu_d_req_valid && u_cpu_top.cpu_d_req_ready;
+    assign obs_dreq_cmd   = u_cpu_top.cpu_d_req_cmd;
+    assign obs_dreq_addr  = 64'(u_cpu_top.cpu_d_req_addr);
+    assign obs_dev        = {u_cpu_top.u_dma.state != 3'd0, u_cpu_top.u_mmio.u_plic.claim_now,
+                             |u_cpu_top.u_mmio.u_plic.irq, u_sd.data_done, u_sd.cmd_done, 3'(u_sd.c_state)};
+
+    // レジスタの窓。x0 は 0。CORE_RF・CORE_FRF は 2 つのバンクと、どちらが新しいかの表 (lvt) を持つ
+    `define CSR `CORE.u_csr
+    always_comb begin
+        reg_val = 64'd0;
+        if (reg_sel < 8'd32)
+            reg_val = (reg_sel == 8'd0) ? 64'd0 :
+                      `CORE.u_rf.lvt[reg_sel[4:0]] ? `CORE.u_rf.bank_b[reg_sel[4:0]]
+                                                   : `CORE.u_rf.bank_a[reg_sel[4:0]];
+        else if (reg_sel < 8'd64)
+            reg_val = `CORE.u_frf.lvt[reg_sel[4:0]] ? `CORE.u_frf.bank_b[reg_sel[4:0]]
+                                                    : `CORE.u_frf.bank_a[reg_sel[4:0]];
+        else
+            case (reg_sel)
+                8'd64: reg_val = 64'(`CSR.priv_r);
+                8'd65: reg_val = `CSR.mstatus_val;
+                8'd66: reg_val = `CSR.mie_val;
+                8'd67: reg_val = `CSR.mip_val;
+                8'd68: reg_val = `CSR.mtvec;
+                8'd69: reg_val = `CSR.mepc;
+                8'd70: reg_val = `CSR.mcause_val;
+                8'd71: reg_val = `CSR.mtval;
+                8'd72: reg_val = `CSR.mscratch;
+                8'd73: reg_val = `CSR.medeleg;
+                8'd74: reg_val = `CSR.mideleg;
+                8'd75: reg_val = `CSR.sstatus_val;
+                8'd76: reg_val = `CSR.sie_val;
+                8'd77: reg_val = `CSR.sip_val;
+                8'd78: reg_val = `CSR.stvec;
+                8'd79: reg_val = `CSR.sepc;
+                8'd80: reg_val = `CSR.scause_val;
+                8'd81: reg_val = `CSR.stval;
+                8'd82: reg_val = `CSR.sscratch;
+                8'd83: reg_val = `CSR.satp;
+                8'd84: reg_val = `CSR.stimecmp;
+                8'd85: reg_val = `CSR.mcycle;
+                8'd86: reg_val = `CSR.minstret;
+                8'd87: reg_val = `CSR.mtime;
+                8'd88: reg_val = 64'({`CSR.frm, `CSR.fflags});
+                default: reg_val = 64'd0;
+            endcase
+    end
+    `undef CSR
 
     // UART: 次の立ち上がりで tx_fifo から出る字 (上流の LITEX_PERIPH が $write した時と同じ条件)
     assign uart_tx_valid = rst_n && !u_per.tx_empty && (u_per.tx_timer >= u_per.UART_CYCLES);
