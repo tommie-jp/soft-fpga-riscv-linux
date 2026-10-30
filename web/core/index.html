@@ -5,18 +5,21 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>mmRISC-2 Linux</title>
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/xterm@5.3.0/css/xterm.css">
+<script src="lang.js"></script>
 <style>
   :root {
     --bg: #f6f6f4;
     --fg: #1d1d1b;
     --muted: #6b6b66;
+    --line: #d8d8d2;
     --term-bg: #111211;
     --accent: #2f6f4f;
   }
   @media (prefers-color-scheme: dark) {
-    :root { --bg: #161716; --fg: #e8e8e4; --muted: #9a9a94; --accent: #7fc19c; }
+    :root { --bg: #161716; --fg: #e8e8e4; --muted: #9a9a94; --line: #33352f; --accent: #7fc19c; }
   }
   * { box-sizing: border-box; }
+  html[data-lang="ja"] [lang="en"], html[data-lang="en"] [lang="ja"] { display: none; }
   body {
     margin: 0;
     background: var(--bg);
@@ -27,42 +30,105 @@
   h1 { font-size: 22px; margin: 0 0 4px; }
   h2 { font-size: 18px; margin: 28px 0 4px; }
   p.lead { margin: 0 0 16px; color: var(--muted); }
-  #term { background: var(--term-bg); padding: 8px; border-radius: 6px; }
+  a { color: var(--accent); }
+  header { display: flex; justify-content: space-between; align-items: center; gap: 8px; margin: 0 0 8px; font-size: 13px; }
+  button { font: inherit; color: var(--fg); background: transparent; border: 1px solid var(--line); border-radius: 4px; padding: 2px 10px; cursor: pointer; }
+  button:hover { border-color: var(--accent); }
+  /* 端末は桁数が決まっているので、狭い画面では横に送って見る */
+  #term { background: var(--term-bg); padding: 8px; border-radius: 6px; overflow-x: auto; }
   #term .xterm-viewport { background-color: var(--term-bg) !important; scrollbar-color: #444 var(--term-bg); }
+  #cmd-form { display: flex; gap: 6px; margin-top: 8px; }
+  #cmd {
+    flex: 1; min-width: 0; font: 15px ui-monospace, "SFMono-Regular", Menlo, monospace;
+    color: var(--fg); background: transparent; border: 1px solid var(--line); border-radius: 4px; padding: 4px 8px;
+  }
   #bar {
     display: flex; flex-wrap: wrap; gap: 4px 20px; margin-top: 8px;
     font: 13px/1.5 ui-monospace, "SFMono-Regular", Menlo, monospace; color: var(--muted);
   }
   #status { color: var(--accent); }
+  table.examples { border-collapse: collapse; width: 100%; margin-top: 4px; }
+  table.examples td { padding: 6px 8px; border-bottom: 1px solid var(--line); vertical-align: top; }
+  table.examples td:first-child { white-space: nowrap; }
+  table.examples button { font-family: ui-monospace, "SFMono-Regular", Menlo, monospace; }
+  #la-scroll { overflow-x: auto; }
   ul.credits { margin: 4px 0 0; padding-left: 20px; font-size: 13px; color: var(--muted); }
-  ul.credits a, p.nav a { color: var(--accent); }
-  p.nav { margin: 0 0 8px; font-size: 13px; }
   kbd { font-family: inherit; border: 1px solid var(--muted); border-radius: 3px; padding: 0 4px; }
+  @media (max-width: 640px) {
+    main { padding: 12px 8px 32px; }
+    h1 { font-size: 19px; }
+    h2 { font-size: 16px; margin-top: 22px; }
+    p.lead { font-size: 14px; }
+    #term { padding: 4px; }
+    table.examples td { padding: 6px 4px; font-size: 14px; }
+  }
 </style>
 </head>
 <body>
 <main>
-  <p class="nav"><a href="../">soft-fpga-riscv-linux</a></p>
-  <h1>mmRISC-2 で Linux</h1>
-  <p class="lead">
+  <header>
+    <a href="../">soft-fpga-riscv-linux</a>
+    <button id="lang-toggle" type="button">English</button>
+  </header>
+  <h1><span lang="ja">mmRISC-2 で Linux</span><span lang="en">Linux on mmRISC-2</span></h1>
+  <p class="lead" lang="ja">
     RV64GC コア mmRISC-2 の RTL を Verilator で C++ にし、Wasm にした模型です。
     PC で起動を済ませて保存した状態を読み戻し、BusyBox のシェルから始めます。
-    <kbd>ls</kbd> などを打てます。1 クロックずつ回しているので、応答は数秒かかります。
+    端末に <kbd>ls</kbd> などを打つか、下の欄に書いて送ってください。1 クロックずつ回しているので、応答は数秒かかります。
+  </p>
+  <p class="lead" lang="en">
+    The RTL of the RV64GC core mmRISC-2, turned into C++ by Verilator and into Wasm.
+    A boot saved on a PC is restored, so it starts at the BusyBox shell.
+    Type <kbd>ls</kbd> and so on into the terminal, or into the box below it. The model runs clock by clock:
+    an answer takes a few seconds.
   </p>
   <div id="term"></div>
+  <form id="cmd-form" autocomplete="off">
+    <input id="cmd" type="text" autocapitalize="off" autocorrect="off" spellcheck="false" enterkeyhint="send"
+           aria-label="command">
+    <button type="submit"><span lang="ja">送る</span><span lang="en">Send</span></button>
+  </form>
   <div id="bar">
-    <span id="status">準備中</span>
+    <span id="status"></span>
     <span id="cycle"></span>
     <span id="rate"></span>
   </div>
-  <h2>CPU の中 (Logic Analyzer)</h2>
+
+  <h2><span lang="ja">コマンドの例</span><span lang="en">Examples</span></h2>
   <p class="lead">
-    1 クロックごとの退役・トラップ・TLB ミス・主記憶の読み書き・UART を記録しています (直近 8192 クロック)。
-    ⚙ Trigger のプリセット「打鍵」を選んで Set し、端末で字を打つと、その字が入った瞬間からの波形で止まります。
+    <span lang="ja">押すとシェルに送ります。</span><span lang="en">Press one to send it to the shell.</span>
   </p>
-  <div id="la-root"></div>
-  <h2>出どころとライセンス</h2>
-  <ul class="credits">
+  <table class="examples">
+    <tr>
+      <td><button type="button" data-cmd="ls /">ls /</button></td>
+      <td><span lang="ja">ルートのディレクトリの一覧。SD カードの模型の ext4 から読みます</span>
+          <span lang="en">The root directory, read from ext4 on the model of the SD card</span></td>
+    </tr>
+    <tr>
+      <td><button type="button" data-cmd="cat /proc/cpuinfo">cat /proc/cpuinfo</button></td>
+      <td><span lang="ja">CPU の ISA (rv64imafdc …) と MMU (sv39)。カーネルが device tree から読んだ物です</span>
+          <span lang="en">The ISA of the CPU (rv64imafdc …) and its MMU (sv39), as the kernel read them from the device tree</span></td>
+    </tr>
+    <tr>
+      <td><button type="button" data-cmd="cat /proc/interrupts">cat /proc/interrupts</button></td>
+      <td><span lang="ja">割り込みの回数。打った字ごとに UART の割り込みが増えます</span>
+          <span lang="en">Interrupt counts. Every typed key adds one to the UART's</span></td>
+    </tr>
+  </table>
+
+  <h2><span lang="ja">CPU の中 (Logic Analyzer)</span><span lang="en">Inside the CPU (logic analyzer)</span></h2>
+  <p class="lead" lang="ja">
+    1 クロックごとの退役・トラップ・TLB ミス・主記憶の読み書き・UART を記録しています (直近 8192 クロック)。
+    ⚙ Trigger のプリセット「打鍵 / Key press」を選んで Set し、端末で字を打つと、その字が入った瞬間からの波形で止まります。
+  </p>
+  <p class="lead" lang="en">
+    Each clock records retire, trap, TLB miss, main memory reads and writes, and the UART (the last 8192 clocks).
+    Choose the ⚙ Trigger preset "打鍵 / Key press", Set it, and type a key: the trace stops from the moment the key arrives.
+  </p>
+  <div id="la-scroll"><div id="la-root"></div></div>
+
+  <h2><span lang="ja">出どころとライセンス</span><span lang="en">Sources and licenses</span></h2>
+  <ul class="credits" lang="ja">
     <li>このページと模型を回す道具は <a href="https://github.com/tommie-jp/soft-fpga-riscv-linux">soft-fpga-riscv-linux</a> (Apache-2.0、<a href="licenses/soft-fpga-riscv-linux-LICENSE.txt">LICENSE</a>)。
       mmRISC-2 を使った個人の試みで、mmRISC-2 の作者の公認ではありません</li>
     <li><a href="https://github.com/munetomo-maruyama/mmRISC-2">mmRISC-2</a> (Munetomo Maruyama) の RTL と起動の物一式。
@@ -76,6 +142,19 @@
       <a href="https://github.com/xtermjs/xterm.js">xterm.js</a> (MIT)、
       Logic Analyzer は <a href="https://github.com/tommie-jp/soft-fpga">soft-FPGA</a> の rtlscope (MIT、<a href="licenses/soft-fpga-LICENSE.txt">LICENSE</a>)</li>
   </ul>
+  <ul class="credits" lang="en">
+    <li>This page and the tools that run the model: <a href="https://github.com/tommie-jp/soft-fpga-riscv-linux">soft-fpga-riscv-linux</a> (Apache-2.0, <a href="licenses/soft-fpga-riscv-linux-LICENSE.txt">LICENSE</a>).
+      A personal project that uses mmRISC-2, not endorsed by the author of mmRISC-2</li>
+    <li>The RTL and the boot files of <a href="https://github.com/munetomo-maruyama/mmRISC-2">mmRISC-2</a> (Munetomo Maruyama).
+      Apache-2.0 (<a href="licenses/mmrisc2-LICENSE.txt">LICENSE</a>, <a href="licenses/mmrisc2-NOTICE.txt">NOTICE</a>)</li>
+    <li>In the saved state (<code>state.gz</code>):
+      the Linux kernel (GPL-2.0; source at the <a href="https://github.com/munetomo-maruyama/mmRISC-2/releases/tag/linux-src-4929f78c004e">mmRISC-2 release</a>),
+      OpenSBI (BSD-2-Clause; <a href="https://github.com/riscv-software-src/opensbi">source</a> and <code>opensbi_patches/</code> of mmRISC-2),
+      BusyBox 1.37.0 (GPL-2.0; <code>busybox-static</code> of Debian's <a href="https://packages.debian.org/source/trixie/busybox">busybox 1:1.37.0-6</a>, unchanged)</li>
+    <li>The Verilator runtime (<a href="https://github.com/verilator/verilator">Verilator</a> 5.042, LGPL-3.0 or Artistic-2.0),
+      <a href="https://github.com/xtermjs/xterm.js">xterm.js</a> (MIT),
+      and the rtlscope logic analyzer of <a href="https://github.com/tommie-jp/soft-fpga">soft-FPGA</a> (MIT, <a href="licenses/soft-fpga-LICENSE.txt">LICENSE</a>)</li>
+  </ul>
 </main>
 <script src="https://cdn.jsdelivr.net/npm/xterm@5.3.0/lib/xterm.js"></script>
 <!-- Logic Analyzer: 読み込み順は soft-FPGA の sft-la-glue.js の約束どおり -->
@@ -86,12 +165,47 @@
 <script src="la/sft-la-ctrl.js"></script>
 <script src="la/sft-la-glue.js"></script>
 <script>
-  const term = new Terminal({ cols: 100, rows: 28, convertEol: false, fontSize: 14, scrollback: 5000,
-                              theme: { background: '#111211' } });
+  // 狭い画面 (スマホ) では字を小さくし、桁を 80 にする。それでも収まらない分は #term を横に送る
+  const NARROW = window.matchMedia('(max-width: 640px)').matches;
+  const term = new Terminal({ cols: NARROW ? 80 : 100, rows: NARROW ? 24 : 28, convertEol: false,
+                              fontSize: NARROW ? 11 : 14, scrollback: 5000, theme: { background: '#111211' } });
   term.open(document.getElementById('term'));
-  term.focus();
+  if (!NARROW) term.focus();   // スマホでは開いた途端にキーボードが出ないようにする
 
   const $ = (id) => document.getElementById(id);
+
+  // スクリプトで作る文言 (worker.js の status の id と、速さの表示)
+  const TEXT = {
+    ja: {
+      init: '準備中', wasm: 'Wasm を読み込み中', fetch: '保存した状態 (state.gz) を取得・展開中', restore: '読み戻し中',
+      running: (m) => `動作中 (${(m.size / 1e6).toFixed(0)} MB を取得・展開 ${m.tFetch.toFixed(1)} 秒、読み戻し ${m.tRestore.toFixed(1)} 秒)`,
+      error: (m) => 'エラー: ' + m.text,
+      cycle: (n) => `クロック ${n.toLocaleString()}`,
+      rate: (r) => `${Math.round(r / 1000).toLocaleString()} k クロック/秒`
+    },
+    en: {
+      init: 'Starting', wasm: 'Loading Wasm', fetch: 'Fetching and unpacking the saved state (state.gz)', restore: 'Restoring',
+      running: (m) => `Running (${(m.size / 1e6).toFixed(0)} MB fetched and unpacked in ${m.tFetch.toFixed(1)} s, restored in ${m.tRestore.toFixed(1)} s)`,
+      error: (m) => 'Error: ' + m.text,
+      cycle: (n) => `cycle ${n.toLocaleString('en')}`,
+      rate: (r) => `${Math.round(r / 1000).toLocaleString('en')} k cycles/s`
+    }
+  };
+  // 最後に受けた status と stats。言語を替えた時に作り直す
+  let lastStatus = { id: 'init' };
+  let lastStats = null;
+  const showStatus = () => {
+    const t = TEXT[SFRL_LANG.get()][lastStatus.id];
+    $('status').textContent = typeof t === 'function' ? t(lastStatus) : t;
+  };
+  const showStats = () => {
+    if (!lastStats) return;
+    const t = TEXT[SFRL_LANG.get()];
+    $('cycle').textContent = t.cycle(lastStats.cycle);
+    $('rate').textContent = t.rate(lastStats.rate);
+  };
+  SFRL_LANG.onChange(() => { showStatus(); showStats(); });
+
   const worker = new Worker('worker.js', { type: 'module' });
   let lag = null;   // setupLaWorker の戻り (LogicAnalyzer)
   const drawLa = () => { if (lag) lag.draw(); requestAnimationFrame(drawLa); };
@@ -107,19 +221,33 @@
       });
       requestAnimationFrame(drawLa);
     }
-    else if (m.type === 'status') $('status').textContent = m.text;
-    else if (m.type === 'error') $('status').textContent = 'エラー: ' + m.text;
-    else if (m.type === 'stats') {
-      $('cycle').textContent = `クロック ${m.cycle.toLocaleString()}`;
-      $('rate').textContent = `${Math.round(m.rate / 1000).toLocaleString()} k クロック/秒`;
-    }
+    else if (m.type === 'status') { lastStatus = m; showStatus(); }
+    else if (m.type === 'error') { lastStatus = { id: 'error', text: m.text }; showStatus(); }
+    else if (m.type === 'stats') { lastStats = m; showStats(); }
   };
+
+  const sendKeys = (s) => worker.postMessage({ type: 'key', bytes: Array.from(new TextEncoder().encode(s)) });
+
   // ash はプロンプトのたびにカーソル位置を問い (ESC[6n)、xterm は答え (ESC[行;桁R) を返す。
   // 答えを渡すと、その後の模型の時間で約 50 ミリ秒 (画面では 8 秒ほど) 打った字が捨てられるので渡さない
   const CURSOR_REPORT = /\x1b\[\d+;\d+R/g;
   term.onData((s) => {
     const keys = s.replace(CURSOR_REPORT, '');
-    if (keys) worker.postMessage({ type: 'key', bytes: Array.from(new TextEncoder().encode(keys)) });
+    if (keys) sendKeys(keys);
+  });
+
+  // 欄から送る (スマホでは端末に直に打つより確か)。空のまま送ると Enter だけ送る
+  $('cmd-form').addEventListener('submit', (e) => {
+    e.preventDefault();
+    sendKeys($('cmd').value + '\r');
+    $('cmd').value = '';
+  });
+  // コマンドの例
+  document.querySelectorAll('button[data-cmd]').forEach((b) => {
+    b.addEventListener('click', () => {
+      sendKeys(b.dataset.cmd + '\r');
+      $('term').scrollIntoView({ behavior: 'smooth', block: 'start' });
+    });
   });
 </script>
 </body>

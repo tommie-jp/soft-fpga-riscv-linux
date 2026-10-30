@@ -85,8 +85,8 @@ var MMRISC2_LA_CONFIG = {
 
 // トリガーのプリセット (sft-la-ctrl.js の triggerPresets)。post は発火後に記録するクロック数
 var MMRISC2_TRIGGER_PRESETS = [
-  { label: '打鍵', tip: '打った字が UART に入った瞬間から。割り込み → カーネル → ash が動く', sig: 'uart_rx', mode: 'rise', post: 6000 },
-  { label: 'U モードに入る', tip: 'ユーザーのプログラム (ash や ls) の命令が退役し始めた所', sig: 'priv', mode: 'eq', value: '0', post: 4000 },
-  { label: 'トラップ', tip: '例外か割り込みでトラップに入った所', sig: 'trap', mode: 'rise', post: 2000 },
-  { label: 'DTLB ミス', tip: 'データ側の TLB を引き損ねてページ表を引き始める所', sig: 'dtlb', mode: 'rise', post: 2000 }
+  { label: '打鍵 / Key press', tip: '打った字が UART に入った瞬間から。割り込み → カーネル → ash が動く / From the moment a typed key reaches the UART: interrupt, kernel, ash', sig: 'uart_rx', mode: 'rise', post: 6000 },
+  { label: 'U モード / U-mode', tip: 'ユーザーのプログラム (ash や ls) の命令が退役し始めた所 / Where instructions of a user program (ash, ls) start to retire', sig: 'priv', mode: 'eq', value: '0', post: 4000 },
+  { label: 'トラップ / Trap', tip: '例外か割り込みでトラップに入った所 / Entry to a trap, by an exception or an interrupt', sig: 'trap', mode: 'rise', post: 2000 },
+  { label: 'DTLB ミス / DTLB miss', tip: 'データ側の TLB を引き損ねてページ表を引き始める所 / A data-side TLB miss, where the page table walk starts', sig: 'dtlb', mode: 'rise', post: 2000 }
 ];

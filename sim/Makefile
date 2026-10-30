@@ -74,10 +74,10 @@ WEB      := $(ROOT)/web
 WEB_DIST := $(ROOT)/dist
 CORE_WEB := $(WEB_DIST)/$(CORE)
 
-web: $(WASM_OUT) $(STATE).gz $(WEB)/index.html $(WEB)/core/index.html $(WEB)/worker.js $(WEB)/la-defs.js $(wildcard $(WEB)/la/*.js)
+web: $(WASM_OUT) $(STATE).gz $(WEB)/index.html $(WEB)/core/index.html $(WEB)/worker.js $(WEB)/la-defs.js $(WEB)/lang.js $(wildcard $(WEB)/la/*.js)
 	mkdir -p $(CORE_WEB)/la $(CORE_WEB)/licenses
-	cp $(WEB)/index.html $(WEB_DIST)/
-	cp $(WEB)/core/index.html $(WEB)/worker.js $(WEB)/la-defs.js $(WASM_OUT) $(WASM_OUT:.mjs=.wasm) $(CORE_WEB)/
+	cp $(WEB)/index.html $(WEB)/lang.js $(WEB_DIST)/
+	cp $(WEB)/core/index.html $(WEB)/worker.js $(WEB)/la-defs.js $(WEB)/lang.js $(WASM_OUT) $(WASM_OUT:.mjs=.wasm) $(CORE_WEB)/
 	cp $(WEB)/la/*.js $(CORE_WEB)/la/
 	cp $(STATE).gz $(CORE_WEB)/state.gz
 	for f in $(CORE_LICENSES); do cp $$f $(CORE_WEB)/licenses/$(CORE)-$$(basename $$f).txt; done
