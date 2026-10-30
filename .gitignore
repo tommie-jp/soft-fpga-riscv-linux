@@ -1,0 +1,13 @@
+# 作る物 (make で作り直せる)
+/build/
+/dist/
+
+# 保存した模型の状態 (生で約 330 MB。make linux-sd-save で作り直せる。Pages には gzip を置く)
+/state/
+
+# OS / Editor
+.DS_Store
+*.swp
+*~
+.vscode/
+.playwright-mcp/

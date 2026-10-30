@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>soft-fpga-riscv-linux</title>
+<style>
+  :root { --bg: #f6f6f4; --fg: #1d1d1b; --muted: #6b6b66; --accent: #2f6f4f; --line: #d8d8d2; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #161716; --fg: #e8e8e4; --muted: #9a9a94; --accent: #7fc19c; --line: #33352f; }
+  }
+  body {
+    margin: 0; background: var(--bg); color: var(--fg);
+    font: 15px/1.6 system-ui, -apple-system, "Segoe UI", "Hiragino Sans", sans-serif;
+  }
+  main { max-width: 760px; margin: 0 auto; padding: 24px 16px 40px; }
+  h1 { font-size: 22px; margin: 0 0 4px; }
+  p.lead { margin: 0 0 20px; color: var(--muted); }
+  a { color: var(--accent); }
+  table { border-collapse: collapse; width: 100%; }
+  th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--line); vertical-align: top; }
+  th { font-weight: 600; color: var(--muted); font-size: 13px; }
+  footer { margin-top: 28px; font-size: 13px; color: var(--muted); }
+</style>
+</head>
+<body>
+<main>
+  <h1>soft-fpga-riscv-linux</h1>
+  <p class="lead">
+    RISC-V のコアの RTL を Verilator で C++ にし、Wasm にしてブラウザで回します。
+    PC で Linux の起動を済ませて保存した状態を読み戻し、BusyBox のシェルから始めます。
+    Logic Analyzer で CPU の中の信号も見られます。
+    <br>
+    RTL of RISC-V cores, turned into C++ by Verilator and into Wasm, running in the browser:
+    a Linux boot saved on a PC is restored at the BusyBox shell.
+  </p>
+  <table>
+    <thead><tr><th>コア / core</th><th>ISA</th><th>中身 / contents</th></tr></thead>
+    <tbody>
+      <tr>
+        <td><a href="mmrisc2/">mmRISC-2</a></td>
+        <td>RV64GC、Sv39</td>
+        <td>Linux + OpenSBI + BusyBox (<a href="https://github.com/munetomo-maruyama/mmRISC-2">mmRISC-2</a> の起動一式)</td>
+      </tr>
+    </tbody>
+  </table>
+  <footer>
+    ソース / source: <a href="https://github.com/tommie-jp/soft-fpga-riscv-linux">tommie-jp/soft-fpga-riscv-linux</a> (Apache-2.0)。
+    各コアの作者の公認ではない、個人の試みです (not endorsed by the authors of the cores)。
+    出どころとライセンスはコアごとのページの下にあります。
+  </footer>
+</main>
+</body>
+</html>

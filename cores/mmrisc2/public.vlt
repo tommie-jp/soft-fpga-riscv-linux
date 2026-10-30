@@ -1,0 +1,4 @@
+`verilator_config
+// main.cpp が最初の eval の後に書く配列。上流のファイルは書き換えず、ここで public にする
+public_flat_rw -module "AXI4_SLAVE_MEM" -var "mem"
+public_flat_rw -module "LITEX_PERIPH_RX" -var "rom"

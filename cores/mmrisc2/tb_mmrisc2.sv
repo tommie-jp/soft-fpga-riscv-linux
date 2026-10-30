@@ -1,0 +1,723 @@
+//---------------------------------------------------------------------------
+// tb_mmrisc2.sv
+//
+// 元: mmRISC-2/SIM/SIM_BIOS/tb_BIOS.sv (Rev.02-4-gc9587f7) の +linux の道。
+// --timing 無しで作れるよう (後で --savable を足すため)、次を変えた:
+//
+//   - ポートを sim/main.cpp との境目にした (README の「共通とコア別の境目」)。
+//     clk と rst_n は入力。元は always #5 と initial の repeat (20) @(posedge clk)
+//   - 主記憶と ROM は load.cpp がバイナリのまま書く。元は initial の #1 の後の
+//     $readmemh。+rlat / +blat は無し (u_mem の initial と順序を争うため)
+//   - 止める条件は always で stop_code に出し、main.cpp が見る。元は initial
+//     の while (...) @(posedge clk)。最後の報告は final に移した
+//   - BIOS の道 (+bios、PASS / FAIL) は無し。常に +linux の動き
+//   - cycle_count は 64 ビット (int だと約 21 億クロック、PC で 1.5 時間で溢れる)
+//   - 上限 (+maxcycles) は入力ポート max_cycles にした。main.cpp が plusarg を読んで渡す。
+//     模型の中の変数だと、読み戻した時に保存した時の値に戻ってしまう
+//   - obs_* (LogicAnalyzer で見る信号) をポートに出した
+//   - +fillstat の fs_ent_t を packed にした (--savable が unpacked の構造体を保存できない)
+//   - LITEX_PERIPH を、UART の受信を足した派生 LITEX_PERIPH_RX に替えた。
+//     uart_rx_* はその受信 FIFO につながる。送った字は $write せず、uart_tx_* から
+//     main.cpp が標準出力へ出す
+//
+// 以下は元の説明 (+linux に関わる所)。
+//
+// CPU_TOP, with the real caches, main memory on AXI4 and the part of the
+// LiteX SoC the BIOS needs on AXI4-Lite (LITEX_PERIPH): ROM, SRAM, ctrl,
+// timer0 and the UART, whose interrupt goes to PLIC source 1 exactly as in
+// the generated SoC (ext_irq = {interrupts, 1'b0}).
+//
+//   +maxcycles=<n>    how long to run (default 3000000; main.cpp reads it)
+//   +uart_cycles=<n>  cycles per character of the UART (default 4340,
+//                     115200 baud at 50 MHz)
+//   +trace            retirement trace
+//   +traps            every trap, with the interrupt lines
+//
+// The ROM holds a stub that jumps to
+// OpenSBI at 0x8000_0000 (a0 = hart 0), and main memory is loaded the way
+// the BIOS would have left it after an SD card boot:
+//
+//   +fw=<file>        fw_jump.bin (raw), at 0x8000_0000
+//   +image=<file>     the kernel Image (raw), at 0x8020_0000
+//   +initrd=<file>    an initramfs (raw), at 0x8200_0000
+//   +sdimg=<file>     an SD card with that image (SD_MODEL, make linux-sd)
+//   +pcmon=<n>        print the PC of the last retired instruction every
+//                     n cycles, to follow the boot where it prints nothing
+//   +utrace=<n>       from the first instruction retired in user mode on,
+//                     every trap, and the first n user mode instructions
+//   +walklog          every fill of the DTLB (@@DW: virtual page, level,
+//                     ASID, the privilege of the access) and every
+//                     SFENCE.VMA (@@SF), with the marks of sim_tlb.sh
+//
+// The run ends at maxcycles, at "Kernel panic", or at "Waiting for root
+// device" / "VFS: Unable to mount", which is as far as a boot can get
+// without an SD card model; with an initramfs, at the prompt of the shell
+// ("\n# ", make linux-initrd).
+//
+// Everything the UART sends is printed. Every trap is reported, with the
+// state of the interrupt lines, so that a BIOS that stops talking can be
+// told apart from one that never gets its UART interrupt.
+//---------------------------------------------------------------------------
+
+`timescale 1ns/1ps
+
+module tb_mmrisc2
+    #(
+        // Where the core starts. The default is main memory, which is
+        // cached. Overriding it with the peripheral window (-GRESET_ADDR)
+        // makes the core fetch its first instructions UNCACHED over
+        // AXI4-Lite, which is what the LiteX BIOS does: it runs from a ROM
+        // at 0x1000_0000, below MEM_BASE.
+        parameter logic [39:0] RESET_ADDR = 40'h00_1000_0000,
+        // L2 cache in bytes (-GL2_SIZE=0 : without it), as in the SoC
+        parameter int          L2_SIZE    = 256 * 1024,
+        // the I$'s next-line prefetch (-GIC_PREFETCH=1), off as in the SoC
+        parameter int          IC_PREFETCH = 0,
+        // the entries of the TLBs (E3a: what a larger TLB would save;
+        // make linux-tlb ITLB=.. DTLB=..), as in the SoC
+        parameter int          ITLB_ENTRIES = 16,
+        parameter int          DTLB_ENTRIES = 32
+    )
+    (
+        input  logic        clk,
+        input  logic        rst_n,
+        // 1 字送る: 次の立ち上がりで tx_fifo から出る字。立ち上がりの前に読む
+        output logic        uart_tx_valid,
+        output logic [7:0]  uart_tx_data,
+        // 1 字受け取らせる: uart_rx_valid && uart_rx_ready の立ち上がりで受信 FIFO に入る
+        input  logic        uart_rx_valid,
+        input  logic [7:0]  uart_rx_data,
+        output logic        uart_rx_ready,
+        // cycle_count がここに達したら stop_code を STOP_MAX にする
+        input  logic [63:0] max_cycles,
+        // 0 で走り続け、0 以外で止まる (STOP_* の値)
+        output logic [7:0]  stop_code,
+        output logic [63:0] cycle_count,
+        // LogicAnalyzer で見る信号 (obs_*)。名前と幅はコアに依らない。
+        // 保存ファイルは模型に縛られるので、足すなら保存し直す
+        output logic        obs_retire,         // 命令が 1 つ退役した
+        output logic [63:0] obs_pc,             //   その PC
+        output logic [31:0] obs_insn,           //   その命令 (CORE の trace_insn)
+        output logic [1:0]  obs_priv,           //   その特権モード (0 U、1 S、3 M)
+        output logic        obs_trap,           // トラップに入った
+        output logic        obs_trap_int,       //   割り込みなら 1
+        output logic [7:0]  obs_trap_cause,     //   mcause / scause の番号
+        output logic [63:0] obs_trap_tval,      //   tval (番地や命令)
+        output logic        obs_itlb_miss,      // 命令側の TLB を引き損ね、ページ表を引いている (その間 1)
+        output logic        obs_dtlb_miss,      // データ側の同じ (CORE_MMU の ev_iwalk / ev_dwalk)
+        output logic        obs_mem_rd,         // 主記憶へ読みを出した (AR の受け渡し)
+        output logic        obs_mem_wr,         // 主記憶へ書きを出した (AW の受け渡し)
+        output logic [63:0] obs_mem_addr,       //   その番地
+        output logic        obs_mem_rdata,      // 読んだデータが 1 拍来た (R の受け渡し)
+        output logic        obs_mem_wdata,      // 書くデータを 1 拍出した (W の受け渡し)
+        output logic [63:0] obs_mem_data        //   そのデータ
+    );
+
+    localparam int          SOC_ADDR_WIDTH = 40;
+    localparam logic [39:0] MEM_BASE    = 40'h00_8000_0000;
+    // the 256 MiB of the Arty: Linux takes its memory from the top down
+    localparam int          MEM_WORDS   = 32 * 1024 * 1024;   // 256 MiB
+    // the peripheral window sits where LiteX puts its ROM
+    localparam logic [39:0] PERIPH_BASE = 40'h00_1000_0000;
+
+    logic rst_dbg_n;
+    assign rst_dbg_n = rst_n;
+
+    //=================================================================
+    // buses
+    //=================================================================
+    logic [3:0]                     axi4_awid, axi4_arid, axi4_bid, axi4_rid;
+    logic [SOC_ADDR_WIDTH-1:0]      axi4_awaddr, axi4_araddr;
+    logic [7:0]                     axi4_awlen, axi4_arlen;
+    logic [2:0]                     axi4_awsize, axi4_arsize;
+    logic [1:0]                     axi4_awburst, axi4_arburst;
+    logic                           axi4_awlock, axi4_arlock;
+    logic [3:0]                     axi4_awcache, axi4_arcache;
+    logic [2:0]                     axi4_awprot, axi4_arprot;
+    logic [3:0]                     axi4_awqos, axi4_arqos;
+    logic                           axi4_awvalid, axi4_awready;
+    logic                           axi4_arvalid, axi4_arready;
+    logic [63:0]                    axi4_wdata, axi4_rdata;
+    logic [7:0]                     axi4_wstrb;
+    logic                           axi4_wlast, axi4_wvalid, axi4_wready;
+    logic [1:0]                     axi4_bresp, axi4_rresp;
+    logic                           axi4_bvalid, axi4_bready;
+    logic                           axi4_rlast, axi4_rvalid, axi4_rready;
+
+    logic [SOC_ADDR_WIDTH-1:0]      axil_awaddr, axil_araddr;
+    logic [2:0]                     axil_awprot, axil_arprot;
+    logic                           axil_awvalid, axil_awready;
+    logic                           axil_arvalid, axil_arready;
+    logic [63:0]                    axil_wdata, axil_rdata;
+    logic [7:0]                     axil_wstrb;
+    logic                           axil_wvalid, axil_wready;
+    logic [1:0]                     axil_bresp, axil_rresp;
+    logic                           axil_bvalid, axil_bready;
+    logic                           axil_rvalid, axil_rready;
+
+    logic                           ndmreset;
+    logic [31:0]                    ext_irq;
+
+    // the SD card (SD_MODEL) on the DMA port
+    logic [31:0] sd_awaddr, sd_araddr;
+    logic        sd_awvalid, sd_awready, sd_wvalid, sd_wready, sd_bvalid, sd_bready;
+    logic        sd_arvalid, sd_arready, sd_rvalid, sd_rready;
+    logic [63:0] sd_wdata, sd_rdata;
+    logic [7:0]  sd_wstrb;
+    logic [1:0]  sd_bresp, sd_rresp;
+    logic              sd_irq;
+    logic              sd_wr0_en, sd_wr1_en;
+    logic [5:0]        sd_wr0_idx, sd_wr1_idx;
+    logic [31:0]       sd_wr0_dat, sd_wr1_dat;
+    logic [64*32-1:0]  sd_regs;
+
+
+    //=================================================================
+    // the CPU
+    //=================================================================
+    CPU_TOP
+        #(
+            .AXI4_ADDR_WIDTH (SOC_ADDR_WIDTH),
+            .AXIL_ADDR_WIDTH (SOC_ADDR_WIDTH),
+            .MEM_BASE        (MEM_BASE),
+            .RESET_VECTOR    ({24'd0, RESET_ADDR}),
+            .NUM_IRQ         (32),
+            // as on the Arty (LitexSystem/cpu/mmrisc/core.py): mtime steps
+            // every 100 cycles, the 500 kHz of timebase-frequency
+            .CLINT_TICK_DIV  (100),
+            .L2_SIZE         (L2_SIZE),
+            .IC_PREFETCH     (IC_PREFETCH),
+            .ITLB_ENTRIES    (ITLB_ENTRIES),
+            .DTLB_ENTRIES    (DTLB_ENTRIES),
+            .USE_BFM         (0)
+        )
+    u_cpu_top
+        (
+            .clk            (clk),
+            .rst_n          (rst_n),
+            .rst_dbg_n      (rst_dbg_n),
+            .ndmreset       (ndmreset),
+            .m_axi4_awid    (axi4_awid),
+            .m_axi4_awaddr  (axi4_awaddr),
+            .m_axi4_awlen   (axi4_awlen),
+            .m_axi4_awsize  (axi4_awsize),
+            .m_axi4_awburst (axi4_awburst),
+            .m_axi4_awlock  (axi4_awlock),
+            .m_axi4_awcache (axi4_awcache),
+            .m_axi4_awprot  (axi4_awprot),
+            .m_axi4_awqos   (axi4_awqos),
+            .m_axi4_awvalid (axi4_awvalid),
+            .m_axi4_awready (axi4_awready),
+            .m_axi4_wdata   (axi4_wdata),
+            .m_axi4_wstrb   (axi4_wstrb),
+            .m_axi4_wlast   (axi4_wlast),
+            .m_axi4_wvalid  (axi4_wvalid),
+            .m_axi4_wready  (axi4_wready),
+            .m_axi4_bid     (axi4_bid),
+            .m_axi4_bresp   (axi4_bresp),
+            .m_axi4_bvalid  (axi4_bvalid),
+            .m_axi4_bready  (axi4_bready),
+            .m_axi4_arid    (axi4_arid),
+            .m_axi4_araddr  (axi4_araddr),
+            .m_axi4_arlen   (axi4_arlen),
+            .m_axi4_arsize  (axi4_arsize),
+            .m_axi4_arburst (axi4_arburst),
+            .m_axi4_arlock  (axi4_arlock),
+            .m_axi4_arcache (axi4_arcache),
+            .m_axi4_arprot  (axi4_arprot),
+            .m_axi4_arqos   (axi4_arqos),
+            .m_axi4_arvalid (axi4_arvalid),
+            .m_axi4_arready (axi4_arready),
+            .m_axi4_rid     (axi4_rid),
+            .m_axi4_rdata   (axi4_rdata),
+            .m_axi4_rresp   (axi4_rresp),
+            .m_axi4_rlast   (axi4_rlast),
+            .m_axi4_rvalid  (axi4_rvalid),
+            .m_axi4_rready  (axi4_rready),
+            .m_axil_awaddr  (axil_awaddr),
+            .m_axil_awprot  (axil_awprot),
+            .m_axil_awvalid (axil_awvalid),
+            .m_axil_awready (axil_awready),
+            .m_axil_wdata   (axil_wdata),
+            .m_axil_wstrb   (axil_wstrb),
+            .m_axil_wvalid  (axil_wvalid),
+            .m_axil_wready  (axil_wready),
+            .m_axil_bresp   (axil_bresp),
+            .m_axil_bvalid  (axil_bvalid),
+            .m_axil_bready  (axil_bready),
+            .m_axil_araddr  (axil_araddr),
+            .m_axil_arprot  (axil_arprot),
+            .m_axil_arvalid (axil_arvalid),
+            .m_axil_arready (axil_arready),
+            .m_axil_rdata   (axil_rdata),
+            .m_axil_rresp   (axil_rresp),
+            .m_axil_rvalid  (axil_rvalid),
+            .m_axil_rready  (axil_rready),
+            // the DMA port : not used here
+            .s_dma_awaddr   ({8'd0, sd_awaddr}),
+            .s_dma_awvalid  (sd_awvalid),
+            .s_dma_awready  (sd_awready),
+            .s_dma_wdata    (sd_wdata),
+            .s_dma_wstrb    (sd_wstrb),
+            .s_dma_wvalid   (sd_wvalid),
+            .s_dma_wready   (sd_wready),
+            .s_dma_bresp    (sd_bresp),
+            .s_dma_bvalid   (sd_bvalid),
+            .s_dma_bready   (sd_bready),
+            .s_dma_araddr   ({8'd0, sd_araddr}),
+            .s_dma_arvalid  (sd_arvalid),
+            .s_dma_arready  (sd_arready),
+            .s_dma_rdata    (sd_rdata),
+            .s_dma_rresp    (sd_rresp),
+            .s_dma_rvalid   (sd_rvalid),
+            .s_dma_rready   (sd_rready),
+            .ext_irq        (ext_irq),
+            .jtag_tck       (1'b0),
+            .jtag_tms_i     (1'b0),
+            .jtag_tms_o     (),
+            .jtag_tms_oe    (),
+            .jtag_tdi       (1'b0),
+            .jtag_tdo       (),
+            .jtag_tdo_oe    (),
+            .jtag_trst_n    (1'b1),
+            .cjtag_en       (1'b0),
+            .cjtag_online   (),
+            .dbg_auth_en    (1'b0),
+            .dbg_auth_key   ('0),
+            .dbg_halted     (),
+            .dbg_running    (),
+            .dbg_dmactive   ()
+        );
+
+
+    //=================================================================
+    // main memory and the LiteX side
+    //=================================================================
+    AXI4_SLAVE_MEM
+        #(
+            .ID_WIDTH   (4),
+            .ADDR_WIDTH (SOC_ADDR_WIDTH),
+            .DATA_WIDTH (64),
+            .DEPTH      (MEM_WORDS),
+            .BASE_ADDR  (MEM_BASE),
+            .INIT_BASE  (64'd0)
+        )
+    u_mem
+        (
+            .clk (clk), .rst_n (rst_n),
+            .awid (axi4_awid), .awaddr (axi4_awaddr), .awlen (axi4_awlen),
+            .awsize (axi4_awsize), .awburst (axi4_awburst),
+            .awlock (axi4_awlock), .awcache (axi4_awcache),
+            .awprot (axi4_awprot), .awqos (axi4_awqos),
+            .awvalid (axi4_awvalid), .awready (axi4_awready),
+            .wdata (axi4_wdata), .wstrb (axi4_wstrb), .wlast (axi4_wlast),
+            .wvalid (axi4_wvalid), .wready (axi4_wready),
+            .bid (axi4_bid), .bresp (axi4_bresp),
+            .bvalid (axi4_bvalid), .bready (axi4_bready),
+            .arid (axi4_arid), .araddr (axi4_araddr), .arlen (axi4_arlen),
+            .arsize (axi4_arsize), .arburst (axi4_arburst),
+            .arlock (axi4_arlock), .arcache (axi4_arcache),
+            .arprot (axi4_arprot), .arqos (axi4_arqos),
+            .arvalid (axi4_arvalid), .arready (axi4_arready),
+            .rid (axi4_rid), .rdata (axi4_rdata), .rresp (axi4_rresp),
+            .rlast (axi4_rlast), .rvalid (axi4_rvalid), .rready (axi4_rready)
+        );
+
+    logic uart_irq, timer_irq;
+
+    LITEX_PERIPH_RX #(.ADDR_WIDTH (SOC_ADDR_WIDTH)) u_per
+        (
+            .clk (clk), .rst_n (rst_n),
+            .rx_valid (uart_rx_valid), .rx_data (uart_rx_data), .rx_ready (uart_rx_ready),
+            .awaddr (axil_awaddr), .awprot (axil_awprot),
+            .awvalid (axil_awvalid), .awready (axil_awready),
+            .wdata (axil_wdata), .wstrb (axil_wstrb),
+            .wvalid (axil_wvalid), .wready (axil_wready),
+            .bresp (axil_bresp), .bvalid (axil_bvalid), .bready (axil_bready),
+            .araddr (axil_araddr), .arprot (axil_arprot),
+            .arvalid (axil_arvalid), .arready (axil_arready),
+            .rdata (axil_rdata), .rresp (axil_rresp),
+            .rvalid (axil_rvalid), .rready (axil_rready),
+            .uart_irq (uart_irq),
+            .timer_irq (timer_irq),
+            .sd_wr0_en (sd_wr0_en), .sd_wr0_idx (sd_wr0_idx), .sd_wr0_dat (sd_wr0_dat),
+            .sd_wr1_en (sd_wr1_en), .sd_wr1_idx (sd_wr1_idx), .sd_wr1_dat (sd_wr1_dat),
+            .sd_regs (sd_regs)
+        );
+
+    SD_MODEL u_sd
+        (
+            .clk (clk), .rst_n (rst_n),
+            .wr0_en (sd_wr0_en), .wr0_idx (sd_wr0_idx), .wr0_dat (sd_wr0_dat),
+            .wr1_en (sd_wr1_en), .wr1_idx (sd_wr1_idx), .wr1_dat (sd_wr1_dat),
+            .regs (sd_regs),
+            .irq (sd_irq),
+            .m_awaddr (sd_awaddr), .m_awvalid (sd_awvalid), .m_awready (sd_awready),
+            .m_wdata (sd_wdata), .m_wstrb (sd_wstrb), .m_wvalid (sd_wvalid), .m_wready (sd_wready),
+            .m_bresp (sd_bresp), .m_bvalid (sd_bvalid), .m_bready (sd_bready),
+            .m_araddr (sd_araddr), .m_arvalid (sd_arvalid), .m_arready (sd_arready),
+            .m_rdata (sd_rdata), .m_rresp (sd_rresp), .m_rvalid (sd_rvalid), .m_rready (sd_rready)
+        );
+
+    // LiteX interrupt i is PLIC source i+1 (LitexSystem/cpu/mmrisc/core.py):
+    // uart 0, timer0 1, ethmac 2 (not modelled), sdcard 3
+    assign ext_irq = {27'd0, sd_irq, 1'b0, timer_irq, uart_irq, 1'b0};
+
+    //=================================================================
+    // what happens
+    //=================================================================
+    `define CORE u_cpu_top.g_core.u_cpu_core
+    // cycle_count はポート
+    int  n_retired, n_traps, n_uart_int, n_orcb, n_stimecmp, n_cbozero, n_clmul;
+    int    pcmon;
+    int    utrace, n_user;
+    bit    in_user;
+
+    // claims per PLIC source
+    `define PLIC u_cpu_top.u_mmio.u_plic
+    int n_claim [0:31];
+    initial for (int i = 0; i < 32; i++) n_claim[i] = 0;
+    always @(posedge clk)
+        if (rst_n && `PLIC.claim_now)
+            n_claim[`PLIC.best_id[`PLIC.ctx_ctl]] <= n_claim[`PLIC.best_id[`PLIC.ctx_ctl]] + 1;
+
+    always @(posedge clk) begin
+        if (rst_n) begin
+            cycle_count <= cycle_count + 1;
+            if ((pcmon > 0) && (cycle_count % pcmon == 0))
+            begin
+                $display("\n@@PC %0d %016h retired %0d", cycle_count, `CORE.trace_pc, n_retired);
+                // who is asking for interrupts, and how the SD card stands
+                $display("@@IRQ ext=%b plic_irq=%b pend=%b gw_ready=%b claims u/t/eth/sd=%0d/%0d/%0d/%0d mip=%h",
+                         ext_irq[4:1], `PLIC.irq,
+                         {`PLIC.pending[4], `PLIC.pending[3], `PLIC.pending[2], `PLIC.pending[1]},
+                         {`PLIC.gw_ready[4], `PLIC.gw_ready[3], `PLIC.gw_ready[2], `PLIC.gw_ready[1]},
+                         n_claim[1], n_claim[2], n_claim[3], n_claim[4], `CORE.u_csr.mip_val);
+                $display("@@SD card=%0d cmd_done=%b data_done=%b ev_en=%b rf=%0d b2m %0d/%0d en=%b m2b %0d/%0d en=%b dma=%0d uart_en=%b",
+                         u_sd.c_state, u_sd.cmd_done, u_sd.data_done, u_sd.ev_enable,
+                         u_sd.rf_cnt, u_sd.b2m_offset, u_sd.b2m_length, u_sd.b2m_enable,
+                         u_sd.m2b_offset, u_sd.m2b_length, u_sd.m2b_enable,
+                         u_cpu_top.u_dma.state, u_per.uart_ev_enable);
+                $fflush;
+            end
+            if (`CORE.trace_valid) begin
+                n_retired <= n_retired + 1;
+                // ORC.B: only the Zbb string functions of Linux use it, so
+                // a count above zero says the kernel took the Zbb paths
+                if ((`CORE.trace_insn & 32'hFFF0707F) == 32'h28705013)
+                    n_orcb <= n_orcb + 1;
+                // cbo.zero: Linux zeroes its pages with it (Zicboz)
+                if ((`CORE.trace_insn & 32'hFFF07FFF) == 32'h0040200F)
+                    n_cbozero <= n_cbozero + 1;
+                // clmul / clmulr / clmulh: Linux's CRCs with Zbc
+                if (((`CORE.trace_insn & 32'hFE00707F) == 32'h0A001033) ||
+                    ((`CORE.trace_insn & 32'hFE00707F) == 32'h0A002033) ||
+                    ((`CORE.trace_insn & 32'hFE00707F) == 32'h0A003033))
+                    n_clmul <= n_clmul + 1;
+                // a CSR instruction on stimecmp: Linux sets its timer there
+                // itself (Sstc) instead of asking OpenSBI
+                if (((`CORE.trace_insn & 32'h0000007F) == 32'h00000073) &&
+                    (`CORE.trace_insn[31:20] == 12'h14D) && (`CORE.trace_insn[14:12] != 3'd0))
+                    n_stimecmp <= n_stimecmp + 1;
+                if ($test$plusargs("trace"))
+                    $display("[%0d] %010h : %08h", cycle_count, `CORE.trace_pc, `CORE.trace_insn);
+                if ((utrace > 0) && (`CORE.trace_priv == 2'd0)) begin
+                    in_user = 1'b1;
+                    if (n_user < utrace)
+                        $display("\n@@U [%0d] %010h : %08h", cycle_count, `CORE.trace_pc, `CORE.trace_insn);
+                    n_user = n_user + 1;
+                end
+            end
+            if (`CORE.trap_valid) begin
+                n_traps <= n_traps + 1;
+                if (`CORE.trap_is_int && (`CORE.trap_cause == 5'd11))
+                    n_uart_int <= n_uart_int + 1;
+                if ($test$plusargs("traps") || in_user)
+                    $display("\n[%0d] TRAP int=%0b cause=%0d epc=%010h tval=%010h  uart_irq=%b meip=%b",
+                             cycle_count, `CORE.trap_is_int, `CORE.trap_cause,
+                             `CORE.trap_epc, `CORE.trap_tval, uart_irq,
+                             u_cpu_top.irq_m_ext[0]);
+            end
+        end
+    end
+
+    // +dmalog : every request of the DMA port into the data cache, with the
+    // address stage 1 of the cache works with, and every answer
+    `define DC u_cpu_top.u_cpu_cache.u_dcache
+    always @(posedge clk) begin
+        if (rst_n && dmalog) begin
+            if (u_cpu_top.u_dma.dc_req_valid && u_cpu_top.u_dma.dc_req_ready)
+                $display("[%0d] DMA req  cmd=%0d addr=%010h size=%0d wdata=%016h",
+                         cycle_count, u_cpu_top.u_dma.dc_req_cmd, u_cpu_top.u_dma.dc_req_addr,
+                         u_cpu_top.u_dma.dc_req_size, u_cpu_top.u_dma.dc_req_wdata);
+            if (u_cpu_top.u_dma.dc_resp_valid)
+                $display("[%0d] DMA resp err=%b data=%016h",
+                         cycle_count, u_cpu_top.u_dma.dc_resp_error, u_cpu_top.u_dma.dc_resp_data);
+            if (`DC.d_req_valid && `DC.d_req_ready && (u_cpu_top.u_dma.state != 0))
+                $display("[%0d] D$  req  cmd=%0d addr=%010h", cycle_count, `DC.d_req_cmd, `DC.d_req_addr);
+        end
+    end
+    bit dmalog;
+    initial dmalog = $test$plusargs("dmalog");
+
+    // +walklog : what the DTLB is filled with, and when it is flushed
+    bit walklog;
+    logic walk_mark_q;
+    initial walklog = $test$plusargs("walklog");
+    always @(posedge clk) begin
+        walk_mark_q <= (u_per.tx_tail[8*7-1:0] == "== tlb:");
+        if (rst_n && walklog) begin
+            if ((u_per.tx_tail[8*7-1:0] == "== tlb:") && !walk_mark_q)
+                $display("@@MARK %0d", cycle_count);
+            if (`CORE.u_mmu.d_fill)
+                $display("@@DW %07h %0d %04h %0d", `CORE.u_mmu.ptw_vpn_r, `CORE.u_mmu.ptw_level,
+                         `CORE.u_mmu.asid, `CORE.u_mmu.d_priv);
+            // a walk of the data side that starts: its page, privilege,
+            // and the PCs in MR and EX
+            if (!`CORE.u_mmu.grant && `CORE.u_mmu.lsu_idle && `CORE.u_mmu.ptw_need &&
+                !`CORE.u_mmu.kill && `CORE.u_mmu.d_need_walk)
+                $display("@@DS %07h %0d %h %h", `CORE.u_mmu.d_vpn, `CORE.u_mmu.d_priv,
+                         `CORE.mr_pc, `CORE.ex_pc);
+            // a walk of the data side that ends: its page, fault, killed
+            if (`CORE.u_mmu.grant && `CORE.u_mmu.for_d && `CORE.u_mmu.ptw_done)
+                $display("@@DE %07h %0d %0d", `CORE.u_mmu.ptw_vpn_r, `CORE.u_mmu.ptw_fault,
+                         `CORE.u_mmu.killed);
+            if (`CORE.u_mmu.sfence_valid)
+                $display("@@SF %0d %016h %016h", cycle_count, `CORE.u_mmu.sfence_vaddr,
+                         `CORE.u_mmu.sfence_asid);
+        end
+    end
+
+    // 主記憶 (u_mem.mem) と ROM (u_per.rom) は load.cpp が最初の eval の後に書く
+    initial begin
+        if (!$value$plusargs("pcmon=%d", pcmon)) pcmon = 0;
+        if (!$value$plusargs("utrace=%d", utrace)) utrace = 0;
+        in_user = 1'b0;
+        n_user  = 0;
+    end
+
+    //-----------------------------------------------------------------
+    // +fillstat : how the line fills of the I$ and the D$ follow each
+    // other (for a next-line prefetch). For every fill: is it the line
+    // after one of the last FS_RECENT fills of the same cache (what a
+    // prefetch of the next line on each miss would have asked for), and
+    // how many cycles after that one. Also the cycles the front end is
+    // empty while an I$ fill is outstanding, the D$ waits while a D$ fill
+    // is, both for the whole run and for user mode.
+    //-----------------------------------------------------------------
+    localparam int FS_RECENT = 4;
+    localparam int FS_GAPS   = 6;     // gap buckets: <8 <16 <32 <64 <256 more
+    // packed: --savable は unpacked の構造体を保存できない
+    typedef struct packed { longint line; longint cyc; } fs_ent_t;
+    fs_ent_t fs_rec [2][FS_RECENT];
+    longint  fs_fills [2], fs_next [2], fs_prev [2], fs_gap [2][FS_GAPS];
+    longint  fs_ife, fs_ife_u, fs_cyc_u, fs_dw, fs_dw_u;
+    longint  fs_pf, fs_pf_hit, fs_fe, fs_wfi;
+    // a fill that waits for the bus (arvalid without arready): [c][0] the
+    // L2 waits for memory with no beat of its fill yet (a second read
+    // could be served then), [c][1] the other cache's read holds the bus
+    // otherwise (its beats are on their way), [c][2] neither (the cycle of
+    // the arbiter's grant, the L2 taking a write); and of those, the cycles
+    // it costs (front end empty / MA waiting)
+    longint  bw [2][3], bw_cost [2][3];
+    // policies of a one-line prefetch buffer, played against the demand
+    // fills of the I$ (meaningful with the prefetch switched off):
+    //   A : the next line after every miss
+    //   B : the next line only after a miss that continues a sequence (the
+    //       line after the last miss, or the line the buffer held)
+    longint  pa_line, pb_line, pa_iss, pa_use, pb_iss, pb_use, last_ic;
+    bit      fillstat;
+    initial begin
+        fillstat = $test$plusargs("fillstat");
+        for (int c = 0; c < 2; c++) begin
+            fs_fills[c] = 0; fs_next[c] = 0; fs_prev[c] = 0;
+            for (int g = 0; g < FS_GAPS; g++) fs_gap[c][g] = 0;
+            for (int k = 0; k < FS_RECENT; k++) begin fs_rec[c][k].line = -10; fs_rec[c][k].cyc = 0; end
+        end
+        for (int c = 0; c < 2; c++) for (int k = 0; k < 3; k++) begin bw[c][k] = 0; bw_cost[c][k] = 0; end
+        fs_ife = 0; fs_ife_u = 0; fs_cyc_u = 0; fs_dw = 0; fs_dw_u = 0; fs_pf = 0; fs_pf_hit = 0; fs_fe = 0; fs_wfi = 0;
+        pa_line = -10; pb_line = -10; pa_iss = 0; pa_use = 0; pb_iss = 0; pb_use = 0; last_ic = -10;
+    end
+    task automatic fs_fill(input int c, input longint line);
+        longint gap;
+        int     hit;
+        hit = -1;
+        for (int k = 0; k < FS_RECENT; k++)
+            if (fs_rec[c][k].line == line - 1) hit = k;
+        fs_fills[c]++;
+        if (hit >= 0) begin
+            fs_next[c]++;
+            gap = longint'(cycle_count) - fs_rec[c][hit].cyc;
+            if      (gap < 8)   fs_gap[c][0]++;
+            else if (gap < 16)  fs_gap[c][1]++;
+            else if (gap < 32)  fs_gap[c][2]++;
+            else if (gap < 64)  fs_gap[c][3]++;
+            else if (gap < 256) fs_gap[c][4]++;
+            else                fs_gap[c][5]++;
+        end
+        for (int k = 0; k < FS_RECENT; k++)
+            if (fs_rec[c][k].line == line + 1) fs_prev[c]++;
+        if (c == 0) begin
+            bit seq;
+            if (line == pa_line) pa_use++;
+            pa_line = line + 1; pa_iss++;
+            seq = (line == last_ic + 1) || (line == pb_line);
+            if (line == pb_line) pb_use++;
+            if (seq) begin pb_line = line + 1; pb_iss++; end
+            last_ic = line;
+        end
+        for (int k = FS_RECENT-1; k > 0; k--) fs_rec[c][k] = fs_rec[c][k-1];
+        fs_rec[c][0].line = line;
+        fs_rec[c][0].cyc  = cycle_count;
+    endtask
+    always @(posedge clk) begin
+        if (rst_n && fillstat) begin
+            // demand fills only (a prefetch is counted on its own)
+            if (u_cpu_top.u_cpu_cache.ic_axi4_arvalid && u_cpu_top.u_cpu_cache.ic_axi4_arready &&
+                !u_cpu_top.u_cpu_cache.ic_ar_pf)
+                fs_fill(0, longint'(u_cpu_top.u_cpu_cache.ic_axi4_araddr >> 6));
+            if (u_cpu_top.ev_ic_pf)     fs_pf++;
+            if (!`CORE.fq_valid)        fs_fe++;
+            if (`CORE.wfi_wait)         fs_wfi++;
+            if (u_cpu_top.ev_ic_pf_hit) fs_pf_hit++;
+            if (u_cpu_top.u_cpu_cache.dc_axi4_arvalid && u_cpu_top.u_cpu_cache.dc_axi4_arready)
+                fs_fill(1, longint'(u_cpu_top.u_cpu_cache.dc_axi4_araddr >> 6));
+            if (!`CORE.fq_valid && (u_cpu_top.u_cpu_cache.ic_outst != 0)) begin
+                fs_ife++;
+                if (in_user) fs_ife_u++;
+            end
+            if (`CORE.stall_ma && u_cpu_top.ev_dc_miss) begin
+                fs_dw++;
+                if (in_user) fs_dw_u++;
+            end
+            if (in_user) fs_cyc_u++;
+            begin
+                bit l2mem, w0, w1, oth0, oth1;
+                int k0, k1;
+                l2mem = (int'(u_cpu_top.g_l2.u_cpu_l2.st) == 6) && (u_cpu_top.g_l2.u_cpu_l2.wcnt == 3'd0) &&
+                        !u_cpu_top.g_l2.u_cpu_l2.m_axi4_rvalid;
+                w0 = u_cpu_top.u_cpu_cache.ic_axi4_arvalid && !u_cpu_top.u_cpu_cache.ic_axi4_arready;
+                w1 = u_cpu_top.u_cpu_cache.dc_axi4_arvalid && !u_cpu_top.u_cpu_cache.dc_axi4_arready;
+                // the arbiter of CPU_CACHE: s0 the D$, s1 the I$
+                oth0 = u_cpu_top.u_cpu_cache.u_arb.x4r_act && !u_cpu_top.u_cpu_cache.u_arb.x4r_g1;
+                oth1 = u_cpu_top.u_cpu_cache.u_arb.x4r_act &&  u_cpu_top.u_cpu_cache.u_arb.x4r_g1;
+                k0 = l2mem ? 0 : oth0 ? 1 : 2;
+                k1 = l2mem ? 0 : oth1 ? 1 : 2;
+                if (w0) begin bw[0][k0]++; if (!`CORE.fq_valid) bw_cost[0][k0]++; end
+                if (w1) begin bw[1][k1]++; if (`CORE.stall_ma)  bw_cost[1][k1]++; end
+            end
+        end
+    end
+    task automatic fs_report;
+        string cn [2] = '{"I$", "D$"};
+        $display("");
+        $display(" line fills (+fillstat), %0d cycles, %0d of them in user mode", cycle_count, fs_cyc_u);
+        for (int c = 0; c < 2; c++)
+            $display("   %s: %0d fills; the line after one of the last %0d: %0d (%0.1f%%), before one: %0d; gap <8 %0d <16 %0d <32 %0d <64 %0d <256 %0d more %0d",
+                     cn[c], fs_fills[c], FS_RECENT, fs_next[c],
+                     (fs_fills[c] > 0) ? 100.0 * real'(fs_next[c]) / real'(fs_fills[c]) : 0.0, fs_prev[c],
+                     fs_gap[c][0], fs_gap[c][1], fs_gap[c][2], fs_gap[c][3], fs_gap[c][4], fs_gap[c][5]);
+        $display("   %0d cycles waiting in WFI; outside them %0d cycles for %0d instructions, CPI %0.3f; front end empty %0d (%0.1f%% of them)",
+                 fs_wfi, longint'(cycle_count) - fs_wfi, n_retired,
+                 real'(longint'(cycle_count) - fs_wfi) / real'(n_retired),
+                 fs_fe, 100.0 * real'(fs_fe) / real'(longint'(cycle_count) - fs_wfi));
+        $display("   policy A (every miss): %0d prefetches, %0d used (%0.1f%%); policy B (sequential misses): %0d, %0d used (%0.1f%%)",
+                 pa_iss, pa_use, (pa_iss > 0) ? 100.0 * real'(pa_use) / real'(pa_iss) : 0.0,
+                 pb_iss, pb_use, (pb_iss > 0) ? 100.0 * real'(pb_use) / real'(pb_iss) : 0.0);
+        $display("   I$ prefetches %0d, misses served from the prefetch buffer %0d (%0.1f%% of the prefetches)",
+                 fs_pf, fs_pf_hit, (fs_pf > 0) ? 100.0 * real'(fs_pf_hit) / real'(fs_pf) : 0.0);
+        $display("   front end empty while an I$ fill is outstanding: %0d (%0.1f%%), in user mode %0d",
+                 fs_ife, 100.0 * real'(fs_ife) / real'(cycle_count), fs_ife_u);
+        $display("   MA waits while the D$ handles a miss: %0d (%0.1f%%), in user mode %0d",
+                 fs_dw, 100.0 * real'(fs_dw) / real'(cycle_count), fs_dw_u);
+        for (int c = 0; c < 2; c++)
+            $display("   %s fill waits for the bus: the L2 waits for memory %0d (costing %0d), the other cache's beats %0d (costing %0d), neither %0d (costing %0d)",
+                     cn[c], bw[c][0], bw_cost[c][0], bw[c][1], bw_cost[c][1], bw[c][2], bw_cost[c][2]);
+    endtask
+
+    initial begin
+        cycle_count = 0;
+        n_retired   = 0;
+        n_orcb      = 0;
+        n_cbozero   = 0;
+        n_clmul     = 0;
+        n_stimecmp  = 0;
+        n_traps     = 0;
+        n_uart_int  = 0;
+    end
+
+    // 観測する信号
+    assign obs_retire     = rst_n && `CORE.trace_valid;
+    assign obs_pc         = `CORE.trace_pc;
+    assign obs_insn       = `CORE.trace_insn;
+    assign obs_priv       = `CORE.trace_priv;
+    assign obs_trap       = rst_n && `CORE.trap_valid;
+    assign obs_trap_int   = `CORE.trap_is_int;
+    assign obs_trap_cause = 8'(`CORE.trap_cause);
+    assign obs_trap_tval  = `CORE.trap_tval;
+    assign obs_itlb_miss  = rst_n && `CORE.u_mmu.ev_iwalk;
+    assign obs_dtlb_miss  = rst_n && `CORE.u_mmu.ev_dwalk;
+    assign obs_mem_rd     = axi4_arvalid && axi4_arready;
+    assign obs_mem_wr     = axi4_awvalid && axi4_awready;
+    assign obs_mem_addr   = 64'(obs_mem_rd ? axi4_araddr : axi4_awaddr);
+    assign obs_mem_rdata  = axi4_rvalid && axi4_rready;
+    assign obs_mem_wdata  = axi4_wvalid && axi4_wready;
+    assign obs_mem_data   = obs_mem_rdata ? axi4_rdata : axi4_wdata;
+
+    // UART: 次の立ち上がりで tx_fifo から出る字 (上流の LITEX_PERIPH が $write した時と同じ条件)
+    assign uart_tx_valid = rst_n && !u_per.tx_empty && (u_per.tx_timer >= u_per.UART_CYCLES);
+    assign uart_tx_data  = u_per.tx_fifo[u_per.tx_rd];
+
+    // 止める理由。main.cpp がこれを見て、残りの行の分 (元と同じ 20000
+    // クロック) 回してから final を呼ぶ。STOP_PROMPT だけは保たない: 送った最後の
+    // 3 字がプロンプトの間だけ立ち、次の字 (打った字のエコー) が出ると 0 に戻る。
+    // main.cpp はこれでシェルが入力を待っているかを知り、続けるか止めるかを決める
+    localparam int STOP_NONE   = 0;
+    localparam int STOP_PROMPT = 1;   // "\n# " : シェルのプロンプト
+    localparam int STOP_PANIC  = 2;   // "Kernel panic"
+    localparam int STOP_NOROOT = 3;   // "Waiting for root device" (SD カード無し)
+    localparam int STOP_VFS    = 4;   // "VFS: Unable to mount"
+    localparam int STOP_MAX    = 5;   // max_cycles (+maxcycles)
+    initial stop_code = 8'(STOP_NONE);
+    always @(posedge clk) begin
+        if (rst_n && ((stop_code == STOP_NONE) || (stop_code == STOP_PROMPT))) begin
+            if (u_per.tx_tail[8*12-1:0] == "Kernel panic")
+                stop_code <= STOP_PANIC;
+            else if (!u_sd.present && (u_per.tx_tail[8*23-1:0] == "Waiting for root device"))
+                stop_code <= STOP_NOROOT;
+            else if (u_per.tx_tail[8*20-1:0] == "VFS: Unable to mount")
+                stop_code <= STOP_VFS;
+            else if (cycle_count >= max_cycles)
+                stop_code <= STOP_MAX;
+            else if (u_per.tx_tail[8*3-1:0] == "\n# ")
+                stop_code <= STOP_PROMPT;
+            else
+                stop_code <= STOP_NONE;
+        end
+    end
+
+    final begin
+        $display("");
+        $display("==========================================================");
+        $display(" ORC.B retired (Zbb string functions of Linux) : %0d", n_orcb);
+        $display(" cbo.zero retired (Zicboz, clear_page of Linux) : %0d", n_cbozero);
+        $display(" clmul* retired (Zbc, the CRCs of Linux)        : %0d", n_clmul);
+        $display(" CSR instructions on stimecmp (Sstc)         : %0d", n_stimecmp);
+        if (stop_code == STOP_PROMPT)
+            $display(" LINUX RUN ENDED : the shell prompt");
+        else
+            $display(" LINUX RUN ENDED");
+        $display(" %0d cycles, %0d retired, %0d traps, pc of the last retired %010h",
+                 cycle_count, n_retired, n_traps, `CORE.trace_pc);
+        $display(" uart_irq=%b meip(PLIC)=%b  uart ev_enable=%b tx_count=%0d",
+                 uart_irq, u_cpu_top.irq_m_ext[0], u_per.uart_ev_enable, u_per.tx_count);
+        $display(" PLIC: prio[1]=%0d pending[1]=%b gw_ready[1]=%b enable[0][1]=%b threshold[0]=%0d irq=%b",
+                 u_cpu_top.u_mmio.u_plic.prio[1], u_cpu_top.u_mmio.u_plic.pending[1],
+                 u_cpu_top.u_mmio.u_plic.gw_ready[1], u_cpu_top.u_mmio.u_plic.enable[0][1],
+                 u_cpu_top.u_mmio.u_plic.threshold[0], u_cpu_top.u_mmio.u_plic.irq);
+        $display(" mie=%h mip=%h mstatus.MIE=%b", `CORE.u_csr.mie_val, `CORE.u_csr.mip_val, `CORE.u_csr.mstatus_mie);
+        if (fillstat) fs_report();
+        $display("==========================================================");
+    end
+
+endmodule : tb_mmrisc2

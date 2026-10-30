@@ -1,0 +1,316 @@
+//---------------------------------------------------------------------------
+// LITEX_PERIPH_RX.sv
+//
+// 元: mmRISC-2/SIM/SIM_BIOS/LITEX_PERIPH.sv (Rev.02-4-gc9587f7)。UART の受信を足した:
+//
+//   - 受信 FIFO (16 字)。rx_valid / rx_data / rx_ready の口から 1 クロックに 1 字入る
+//   - rxtx を読むと FIFO の頭の字、rxempty・rxfull は FIFO の空・満
+//   - ev_pending の RX ビット (bit 1) に 1 を書くと 1 字抜ける。liteuart の
+//     rx_fifo.source.ready = ev.rx.clear と同じで、Linux の liteuart.c は 1 字読む
+//     ごとにそう書く
+//   - RX の事象は FIFO に字がある間立つ (TX と同じく pending = status の水準)
+//   - 送った字を $write しない。字はトップの uart_tx_* から main.cpp が出す
+//
+// 以下は元の説明。
+//
+// The part of the LiteX SoC that sits on the peripheral bus of mmRISC-2 on
+// the Arty build (LitexSystem/build/csr.csv), enough for the LiteX BIOS:
+//
+//   0x1000_0000  ROM   128 KiB, the BIOS image
+//   0x1100_0000  SRAM    8 KiB, stack and data of the BIOS
+//   0x1200_0000  CSRs, 32 bit wide at a stride of four bytes:
+//                  ctrl    0x1200_0000  reset, scratch, bus_errors
+//                  timer0  0x1200_4000  load, reload, en, update_value,
+//                                       value, ev_status, ev_pending,
+//                                       ev_enable
+//                  uart    0x1200_4800  rxtx, txfull, rxempty, ev_status,
+//                                       ev_pending, ev_enable, txempty,
+//                                       rxfull
+//                sdcard  0x1200_3000  passed on to SD_MODEL (sd_*)
+//                (the map of the build with Ethernet: ethmac 0x1000 and
+//                ethphy 0x1800 come first and read as zero here; the
+//                offsets are the localparams below, from build/csr.csv)
+//                every other CSR reads as zero and ignores writes
+//
+// The UART follows litex/soc/cores/uart.py: a TX FIFO of 16, the TX event
+// is a level source triggered while the FIFO is not full, the RX event
+// while the RX FIFO holds something, and the interrupt is
+// (pending & enable). A character leaves the FIFO every +uart_cycles=<n>
+// cycles (default 4340, 115200 baud at 50 MHz) and is printed.
+//
+// The bus is 64 bit wide: a read returns the two CSRs of the double word,
+// a write goes to the CSRs its byte strobes select.
+//---------------------------------------------------------------------------
+
+`timescale 1ns/1ps
+
+module LITEX_PERIPH_RX
+    #(
+        parameter int ADDR_WIDTH  = 40
+    )
+    (
+        input  logic                    clk,
+        input  logic                    rst_n,
+
+        input  logic [ADDR_WIDTH-1:0]   awaddr,
+        input  logic [2:0]              awprot,
+        input  logic                    awvalid,
+        output logic                    awready,
+        input  logic [63:0]             wdata,
+        input  logic [7:0]              wstrb,
+        input  logic                    wvalid,
+        output logic                    wready,
+        output logic [1:0]              bresp,
+        output logic                    bvalid,
+        input  logic                    bready,
+        input  logic [ADDR_WIDTH-1:0]   araddr,
+        input  logic [2:0]              arprot,
+        input  logic                    arvalid,
+        output logic                    arready,
+        output logic [63:0]             rdata,
+        output logic [1:0]              rresp,
+        output logic                    rvalid,
+        input  logic                    rready,
+
+        output logic                    uart_irq,
+        output logic                    timer_irq,
+
+        // UART の受信: rx_valid && rx_ready の立ち上がりで rx_data が FIFO に入る
+        input  logic                    rx_valid,
+        input  logic [7:0]              rx_data,
+        output logic                    rx_ready,
+
+        // the CSRs of the SD card (SD_MODEL): 64 words at 0x1200_3000
+        output logic                    sd_wr0_en,
+        output logic [5:0]              sd_wr0_idx,
+        output logic [31:0]             sd_wr0_dat,
+        output logic                    sd_wr1_en,
+        output logic [5:0]              sd_wr1_idx,
+        output logic [31:0]             sd_wr1_dat,
+        input  logic [64*32-1:0]        sd_regs
+    );
+
+    localparam logic [39:0] ROM_BASE  = 40'h00_1000_0000;
+    localparam logic [39:0] SRAM_BASE = 40'h00_1100_0000;
+    localparam logic [39:0] CSR_BASE  = 40'h00_1200_0000;
+    // offsets of the CSR blocks in the window (LitexSystem/build/csr.csv)
+    localparam logic [15:0] IDENT  = 16'h2000;
+    localparam logic [15:0] SDCARD = 16'h3000;
+    localparam logic [15:0] TIMER  = 16'h4000;
+    localparam logic [15:0] UART   = 16'h4800;
+    localparam int ROM_WORDS  = 128 * 1024 / 8;
+    localparam int SRAM_WORDS =   8 * 1024 / 8;
+
+    logic [63:0] rom  [0:ROM_WORDS-1];
+    logic [63:0] sram [0:SRAM_WORDS-1];
+
+    function automatic bit in_rom (input logic [ADDR_WIDTH-1:0] a);
+        return (a >= ROM_BASE)  && (a < ROM_BASE  + 40'(ROM_WORDS * 8));
+    endfunction
+    function automatic bit in_sram(input logic [ADDR_WIDTH-1:0] a);
+        return (a >= SRAM_BASE) && (a < SRAM_BASE + 40'(SRAM_WORDS * 8));
+    endfunction
+    function automatic bit in_csr (input logic [ADDR_WIDTH-1:0] a);
+        return (a >= CSR_BASE)  && (a < CSR_BASE  + 40'h1_0000);
+    endfunction
+
+    //-----------------------------------------------------------------
+    // UART
+    //-----------------------------------------------------------------
+    logic [7:0] tx_fifo [0:15];
+    logic [4:0] tx_count;
+    logic [3:0] tx_rd;
+    logic [1:0] uart_ev_enable;
+    int         tx_timer;
+    int         UART_CYCLES;
+    initial if (!$value$plusargs("uart_cycles=%d", UART_CYCLES)) UART_CYCLES = 4340;
+    logic       tx_full, tx_empty;
+    // the last characters sent, for the bench to recognise a line
+    logic [8*24-1:0] tx_tail;
+    initial tx_tail = '0;
+    logic [1:0] uart_ev_status;
+
+    logic [7:0] rx_fifo [0:15];
+    logic [4:0] rx_count;
+    logic [3:0] rx_rd;
+    logic       rx_full, rx_empty;
+
+    assign tx_full        = (tx_count == 5'd16);
+    assign tx_empty       = (tx_count == 5'd0);
+    assign rx_full        = (rx_count == 5'd16);
+    assign rx_empty       = (rx_count == 5'd0);
+    assign rx_ready       = rst_n && !rx_full;
+    assign uart_ev_status = {~rx_empty, ~tx_full};    // rx : holds a character, tx : not full
+    assign uart_irq       = |(uart_ev_status & uart_ev_enable);
+
+    //-----------------------------------------------------------------
+    // timer0 (counts down while enabled, reloads at zero)
+    //-----------------------------------------------------------------
+    logic [31:0] t_load, t_reload, t_value, t_latched;
+    logic        t_en, t_zero_pend, t_ev_enable;
+
+    assign timer_irq = t_zero_pend & t_ev_enable;
+
+    logic [31:0] ctrl_scratch;
+
+    function automatic logic [31:0] csr_read(input logic [15:0] off);
+        if ((off >= SDCARD) && (off < SDCARD + 16'h100))
+            return sd_regs[32 * int'(off[7:2]) +: 32];
+        case (off)
+            16'h0004: return ctrl_scratch;
+            TIMER + 16'h00: return t_load;
+            TIMER + 16'h04: return t_reload;
+            TIMER + 16'h08: return {31'd0, t_en};
+            TIMER + 16'h10: return t_latched;
+            TIMER + 16'h14: return {31'd0, t_zero_pend};
+            TIMER + 16'h18: return {31'd0, t_zero_pend};
+            TIMER + 16'h1C: return {31'd0, t_ev_enable};
+            UART  + 16'h00: return {24'd0, rx_fifo[rx_rd]};   // rxtx : the head of the RX FIFO
+            UART  + 16'h04: return {31'd0, tx_full};
+            UART  + 16'h08: return {31'd0, rx_empty};
+            UART  + 16'h0C: return {30'd0, uart_ev_status};
+            UART  + 16'h10: return {30'd0, uart_ev_status};   // level : pending = status
+            UART  + 16'h14: return {30'd0, uart_ev_enable};
+            UART  + 16'h18: return {31'd0, tx_empty};
+            UART  + 16'h1C: return {31'd0, rx_full};
+            IDENT + 16'h04: return 32'h0000_1111;       // id word, arbitrary
+            default:  return 32'd0;
+        endcase
+    endfunction
+
+    //-----------------------------------------------------------------
+    // AXI4-Lite : one transfer at a time in each direction
+    //-----------------------------------------------------------------
+    logic                  aw_got, w_got;
+    logic [ADDR_WIDTH-1:0] aw_q;
+    logic [63:0]           w_q;
+    logic [7:0]            s_q;
+
+    assign awready = ~aw_got & ~bvalid;
+    assign wready  = ~w_got  & ~bvalid;
+    assign arready = ~rvalid;
+
+    // the character written in this cycle, if any
+    logic       tx_push;
+    logic [7:0] tx_char;
+    // a write of 1 to the RX bit of ev_pending in this cycle: one character leaves
+    logic       rx_pop;
+
+    always_ff @(posedge clk or negedge rst_n) begin
+        if (!rst_n) begin
+            aw_got <= 1'b0; w_got <= 1'b0;
+            bvalid <= 1'b0; bresp <= 2'b00;
+            rvalid <= 1'b0; rresp <= 2'b00; rdata <= 64'd0;
+            tx_count <= 5'd0; tx_rd <= 4'd0; tx_timer <= 0;
+            rx_count <= 5'd0; rx_rd <= 4'd0;
+            uart_ev_enable <= 2'd0;
+            t_load <= 0; t_reload <= 0; t_value <= 0; t_latched <= 0;
+            t_en <= 1'b0; t_zero_pend <= 1'b0; t_ev_enable <= 1'b0;
+            ctrl_scratch <= 32'h1234_5678;
+            sd_wr0_en <= 1'b0; sd_wr1_en <= 1'b0;
+        end else begin
+            tx_push = 1'b0;
+            tx_char = 8'd0;
+            rx_pop  = 1'b0;
+            sd_wr0_en <= 1'b0;
+            sd_wr1_en <= 1'b0;
+
+            // --- write
+            if (awvalid && awready) begin aw_got <= 1'b1; aw_q <= awaddr; end
+            if (wvalid && wready)   begin w_got  <= 1'b1; w_q <= wdata; s_q <= wstrb; end
+            if (aw_got && w_got && !bvalid) begin
+                aw_got <= 1'b0; w_got <= 1'b0;
+                bvalid <= 1'b1;
+                bresp  <= 2'b00;
+                if (in_sram(aw_q)) begin
+                    for (int b = 0; b < 8; b++)
+                        if (s_q[b]) sram[(aw_q - SRAM_BASE) >> 3][8*b +: 8] <= w_q[8*b +: 8];
+                end else if (in_csr(aw_q)) begin
+                    for (int h = 0; h < 2; h++) begin
+                        if (|s_q[4*h +: 4]) begin
+                            logic [15:0] off;
+                            logic [31:0] v;
+                            off = 16'(((aw_q - CSR_BASE) & ~40'd7) + 40'(4 * h));
+                            v   = w_q[32*h +: 32];
+                            if ((off >= SDCARD) && (off < SDCARD + 16'h100)) begin
+                                if (h == 0) begin
+                                    sd_wr0_en <= 1'b1; sd_wr0_idx <= off[7:2]; sd_wr0_dat <= v;
+                                end else begin
+                                    sd_wr1_en <= 1'b1; sd_wr1_idx <= off[7:2]; sd_wr1_dat <= v;
+                                end
+                            end
+                            case (off)
+                                16'h0004: ctrl_scratch   <= v;
+                                TIMER + 16'h00: t_load         <= v;
+                                TIMER + 16'h04: t_reload       <= v;
+                                TIMER + 16'h08: begin t_en <= v[0]; if (v[0]) t_value <= t_load; end
+                                TIMER + 16'h0C: t_latched      <= t_value;
+                                TIMER + 16'h18: if (v[0]) t_zero_pend <= 1'b0;
+                                TIMER + 16'h1C: t_ev_enable    <= v[0];
+                                UART  + 16'h00: begin tx_push = 1'b1; tx_char = v[7:0]; end
+                                UART  + 16'h10: if (v[1]) rx_pop = 1'b1;
+                                UART  + 16'h14: uart_ev_enable <= v[1:0];
+                                default: ;
+                            endcase
+                        end
+                    end
+                end else if (!in_rom(aw_q)) begin
+                    bresp <= 2'b11;
+                    $display("LITEX_PERIPH: write to an unmapped address %010h", aw_q);
+                end
+            end
+            if (bvalid && bready) bvalid <= 1'b0;
+
+            // --- read
+            if (arvalid && arready) begin
+                logic [ADDR_WIDTH-1:0] a;
+                logic [15:0] off;
+                a = araddr & ~40'd7;
+                rvalid <= 1'b1;
+                rresp  <= 2'b00;
+                if (in_rom(a))       rdata <= rom[(a - ROM_BASE) >> 3];
+                else if (in_sram(a)) rdata <= sram[(a - SRAM_BASE) >> 3];
+                else if (in_csr(a)) begin
+                    off   = 16'(a - CSR_BASE);
+                    rdata <= {csr_read(off + 16'd4), csr_read(off)};
+                end else begin
+                    rdata <= 64'd0;
+                    rresp <= 2'b11;
+                    $display("LITEX_PERIPH: read of an unmapped address %010h", araddr);
+                end
+            end
+            if (rvalid && rready) rvalid <= 1'b0;
+
+            // --- the UART sends one character every UART_CYCLES
+            if (!tx_empty) begin
+                if (tx_timer >= UART_CYCLES) begin
+                    tx_tail <= {tx_tail[8*23-1:0], tx_fifo[tx_rd]};
+                    tx_rd    <= tx_rd + 4'd1;
+                    tx_timer <= 0;
+                end else begin
+                    tx_timer <= tx_timer + 1;
+                end
+            end
+            if (tx_push && !tx_full) tx_fifo[tx_rd + 4'(tx_count)] <= tx_char;
+            tx_count <= tx_count + ((tx_push && !tx_full) ? 5'd1 : 5'd0)
+                                 - ((!tx_empty && (tx_timer >= UART_CYCLES)) ? 5'd1 : 5'd0);
+
+            // --- the UART receives one character a cycle at most
+            if (rx_valid && rx_ready) rx_fifo[rx_rd + 4'(rx_count)] <= rx_data;
+            if (rx_pop && !rx_empty)  rx_rd <= rx_rd + 4'd1;
+            rx_count <= rx_count + ((rx_valid && rx_ready) ? 5'd1 : 5'd0)
+                                 - ((rx_pop && !rx_empty) ? 5'd1 : 5'd0);
+
+            // --- timer0
+            if (t_en) begin
+                if (t_value == 0) begin
+                    t_value     <= t_reload;
+                    t_zero_pend <= 1'b1;
+                end else begin
+                    t_value <= t_value - 1;
+                end
+            end
+        end
+    end
+
+endmodule : LITEX_PERIPH_RX

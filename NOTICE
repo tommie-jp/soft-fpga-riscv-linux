@@ -1,0 +1,30 @@
+soft-fpga-riscv-linux
+Copyright 2026 open-tommie
+
+This product is licensed under the Apache License, Version 2.0 (see LICENSE),
+except for the files listed below, which keep their own licenses.
+
+It is a personal project that uses mmRISC-2. It is not endorsed by the
+authors of mmRISC-2 or of any other core.
+
+cores/mmrisc2/upstream/
+    mmRISC-2 by Munetomo Maruyama, https://github.com/munetomo-maruyama/mmRISC-2
+    (git submodule, not copied). License: Apache-2.0, with the third-party files
+    listed in its own NOTICE (Linux: GPL-2.0, OpenSBI: BSD-2-Clause, ...).
+
+cores/mmrisc2/tb_mmrisc2.sv
+periph/litex/LITEX_PERIPH_RX.sv
+    Derived from mmRISC-2 SIM/SIM_BIOS/tb_BIOS.sv and LITEX_PERIPH.sv
+    (Rev.02-4-gc9587f7), Apache-2.0. The changes are listed at the top of
+    each file.
+
+sim/wasm/rtlscope_ring.h
+sim/wasm/verilatedos_c.h
+sim/wasm/wasm_compat.h
+web/la/*.js
+    Copied unchanged from soft-FPGA, https://github.com/tommie-jp/soft-fpga.
+    License: MIT (LICENSES/MIT-soft-fpga.txt).
+
+rootfs/rv64-busybox/make-rootfs.sh
+    Downloads busybox-static from Debian (GPL-2.0). The binary is not kept in
+    this repository; it goes into the saved state (state.gz) of the pages.
